@@ -215,7 +215,6 @@ def run(request):
         r'sendmsg.+failed',
         r'recvmsg.+failed',
     ]
-    option.skip_sanitizer = False
 
     _fds_info['main']['skip'] = False
     _fds_info['router']['skip'] = False
