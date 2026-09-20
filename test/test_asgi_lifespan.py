@@ -37,7 +37,7 @@ def setup_cookies(prefix):
         path.touch(0o777)
 
 
-def test_asgi_lifespan():
+def test_asgi_lifespan(requires_restart):
     client.load('lifespan/empty')
 
     setup_cookies('')
@@ -49,7 +49,7 @@ def test_asgi_lifespan():
     assert_cookies('')
 
 
-def test_asgi_lifespan_targets():
+def test_asgi_lifespan_targets(requires_restart):
     path = f'{option.test_dir}/python/lifespan/empty'
 
     assert 'success' in client.conf(

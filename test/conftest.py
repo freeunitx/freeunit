@@ -1,6 +1,5 @@
 import atexit
 import fcntl
-import inspect
 import json
 import os
 import re
@@ -600,9 +599,6 @@ def unit_run(state_dir=None):
 
 def unit_stop():
     if not option.restart:
-        if inspect.stack()[1].function.startswith('test_'):
-            pytest.skip('no restart mode')
-
         return
 
     # Startup may have failed before the process/pid were recorded; nothing to
@@ -976,6 +972,16 @@ def is_su():
 @pytest.fixture
 def is_unsafe(request):
     return request.config.getoption("--unsafe")
+
+
+@pytest.fixture
+def requires_restart():
+    # A test that calls unit_stop() in its body has nothing to observe without
+    # --restart: unit_stop() returns without stopping anything, so everything
+    # after the call would run against a Unit that never went away.  Skip it
+    # up front and visibly instead of letting unit_stop() hide the skip.
+    if not option.restart:
+        pytest.skip('no restart mode')
 
 
 @pytest.fixture
