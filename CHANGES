@@ -395,6 +395,36 @@ Changes with FreeUnit 1.36.2                                     30 Aug 2026
        single comma-joined value RFC 9110 defines them to be; previously
        only the first was consulted.
 
+    *) Bugfix: a response no compressor applies to is no longer served as
+       identity to a client that refused the identity coding.  With a
+       compressor configured, "Accept-Encoding: gzip, identity;q=0" was
+       accepted because gzip was acceptable, and the file was then sent
+       uncompressed anyway when it was below the compressor's "min_length" or
+       its media type was outside "types" -- the identity bytes the request
+       had declined.  Such a request is now answered with "406 Not
+       Acceptable".
+
+    *) Bugfix: a negotiation failure on "Accept-Encoding" was answered with
+       "503 Service Unavailable" instead of "406 Not Acceptable" when the
+       response came from an application.  The router treated every result of
+       the acceptability check other than success as a server error; only the
+       static path reported the 406.
+
+    *) Bugfix: the "*" in "Accept-Encoding" now stands for every enabled
+       compressor the client did not name, not for the identity coding
+       alone.  "identity;q=0, *;q=1" was answered "406 Not Acceptable" with
+       gzip enabled and applicable, because the wildcard could only ever
+       select identity, which that same field refused.  A coding the field
+       does name keeps its own weight and is not matched by the wildcard, so
+       it also wins a tie with it.
+
+    *) Bugfix: a compressor below its own "min_length" is no longer selected
+       over a lower-weight compressor that can be applied.  "min_length"
+       belongs to the compressor, so with gzip at 1000 and deflate at 0 a
+       100-byte response was sent uncompressed because gzip carried the
+       higher weight -- and, to a client that refused identity, answered
+       "406 Not Acceptable" although deflate could satisfy it.
+
     *) Bugfix: a malformed weight in "Accept-Encoding" is no longer read as a
        refusal.  The qvalue was converted with strtod(), which takes no digits
        at all from "identity;q=" and from "identity;q=abc" and reports zero,
