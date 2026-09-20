@@ -51,6 +51,50 @@
 #endif
 
 
+/*
+ * Take one of this file's fixture ports down.
+ *
+ * nxt_port_close() releases the descriptors and the queue mapping only; the
+ * reference nxt_port_new() took is still held, so the port's own memory pool
+ * leaks unless that reference is dropped too.  nxt_runtime_port_remove() does
+ * not help here: every fixture port in this file is created *after*
+ * nxt_runtime_process_add(), which registers in rt->ports only what the
+ * process already carries, so the hash never learned about these ports and
+ * the remove returns early without touching the count.
+ *
+ * The drop has to go through nxt_process_port_remove() first.  The port is
+ * linked into the fixture process's queue by hand rather than through
+ * nxt_process_port_add(), so port->process is NULL; nxt_port_release()'s own
+ * unlink is fine, but the nxt_process_use(task, port->process, -1) it makes
+ * afterwards is a NULL dereference for this port.  The link is cleared
+ * explicitly because nxt_queue_remove() only zeroes it under NXT_DEBUG, and
+ * the check that guards that branch reads it in every build.
+ *
+ * The guard below on port->link.next mirrors the one nxt_port_release()
+ * itself uses (src/nxt_port.c:238): nxt_port_new() zeroes port->link, and
+ * nxt_queue_remove() on a zeroed link dereferences NULL at
+ * (link)->next->prev, so only a port actually linked may be unlinked.  Every
+ * current call site links its port right after creating it with no branch
+ * in between, so the guard never trips today; it stays so a future call
+ * site that fails the link does not resurrect the crash this helper exists
+ * to avoid.
+ */
+static void
+nxt_port_ready_test_port_done(nxt_task_t *task, nxt_port_t *port)
+{
+    nxt_port_close(task, port);
+
+    if (port->link.next != NULL) {
+        nxt_process_port_remove(port);
+
+        port->link.next = NULL;
+        port->link.prev = NULL;
+    }
+
+    nxt_port_use(task, port, -1);
+}
+
+
 static nxt_int_t
 nxt_port_ready_test_case(nxt_thread_t *thr, nxt_task_t *task,
     nxt_port_recv_msg_t *msg, const char *name)
@@ -1303,15 +1347,15 @@ drain:
 done:
 
     if (main_port != NULL) {
-        nxt_port_close(task, main_port);
+        nxt_port_ready_test_port_done(task, main_port);
     }
 
     if (router_port != NULL) {
-        nxt_port_close(task, router_port);
+        nxt_port_ready_test_port_done(task, router_port);
     }
 
     if (proto_port != NULL) {
-        nxt_port_close(task, proto_port);
+        nxt_port_ready_test_port_done(task, proto_port);
     }
 
     return ret;
@@ -1642,18 +1686,19 @@ done:
     /*
      * The handler leaves the queue mapping and its descriptor on the port,
      * and nothing else owns them here: releasing the pool would leak both.
-     * The fixture port never had a socket pair, so this only frees the queue.
+     * The fixture port never had a socket pair, so this only frees the queue
+     * -- and, through nxt_port_ready_test_port_done(), the pool itself.
      */
     if (port != NULL) {
-        nxt_port_close(task, port);
+        nxt_port_ready_test_port_done(task, port);
     }
 
     if (queueless_port != NULL) {
-        nxt_port_close(task, queueless_port);
+        nxt_port_ready_test_port_done(task, queueless_port);
     }
 
     if (nofd_port != NULL) {
-        nxt_port_close(task, nofd_port);
+        nxt_port_ready_test_port_done(task, nofd_port);
     }
 
     thr->runtime = saved_rt;
