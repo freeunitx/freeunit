@@ -219,7 +219,7 @@ def test_applications_string():
     assert 'error' in client.conf('"{}"', 'applications'), 'string'
 
 
-@pytest.mark.skip('not yet, unsafe')
+@pytest.mark.xfail(reason='an application object with only "type" set is accepted', strict=False)
 def test_applications_type_only():
     assert 'error' in client.conf(
         {"app": {"type": "python"}}, 'applications'
@@ -353,7 +353,7 @@ def test_access_log_cstring_nul(temp_dir):
     ), 'path valid'
 
 
-@pytest.mark.skip('not yet, unsafe')
+@pytest.mark.xfail(reason='an empty listener object is accepted', strict=False)
 def test_listeners_empty():
     assert 'error' in client.conf({"*:8080": {}}, 'listeners'), 'listener empty'
 

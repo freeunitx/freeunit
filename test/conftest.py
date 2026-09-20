@@ -974,11 +974,6 @@ def is_su():
 
 
 @pytest.fixture
-def is_unsafe(request):
-    return request.config.getoption("--unsafe")
-
-
-@pytest.fixture
 def require():
     return check_prerequisites
 

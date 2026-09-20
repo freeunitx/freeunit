@@ -11,6 +11,7 @@ class Options:
         'skip_alerts': [],
         'skip_sanitizer': False,
         'system': platform.system(),
+        'unsafe': False,
     }
 
     def __setattr__(self, name, value):

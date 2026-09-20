@@ -778,11 +778,13 @@ jobs:
           # The wasm legs build their guest fixture as the runner user, so
           # they run unprivileged to keep the result reachable by pytest; the
           # others install applications as root.
+          # --unsafe turns on the Autobahn 9.1.1-9.6.6 websocket cases, gated
+          # for run time; each language leg carries at most one of them.
           if [ "${{ matrix.build }}" == "wasm-wasi-component" ] || [ "${{ matrix.build }}" == "wasm" ]; then
             set -o pipefail
-            pytest-3 --print-log ${{ steps.metadata.outputs.testpath }} 2>&1 | tee "$RUNNER_TEMP/pytest.out"
+            pytest-3 --print-log --unsafe ${{ steps.metadata.outputs.testpath }} 2>&1 | tee "$RUNNER_TEMP/pytest.out"
           else
-            sudo -E pytest-3 --print-log ${{ steps.metadata.outputs.testpath }}
+            sudo -E pytest-3 --print-log --unsafe ${{ steps.metadata.outputs.testpath }}
           fi
 
       # check_prerequisites() skips the whole file when the clang/wasi-sysroot
