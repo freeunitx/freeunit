@@ -18,6 +18,7 @@
 | `tools/unitctl`: 3 × `Cargo.toml`, `Cargo.lock`, `openapi-config.json`, `unit-openapi/README.md` | `1.36.1` | `1.36.2` |
 | `tools/unitctl/CHANGELOG.md` | `[Unreleased]` пуст, хотя с 1.36.1 было 12 коммитов в unitctl | секция `[1.36.2]` и ссылки |
 | `pkg/docker/Dockerfile.*` (27 файлов) | `image.version` и `git clone -b` = `1.36.1` | перегенерировать |
+| `pkg/docker/local/Dockerfile.*` (3 файла) | `1.35.5` (устарело) | `1.36.2`, правится вручную |
 | `RELEASE-PROCESS.md`, пример в appendix | `1.36.1` / `13601` | `1.36.2` / `13602` |
 
 Вручную не правятся:
@@ -165,6 +166,22 @@ make -C pkg/docker clean && make -C pkg/docker dockerfiles   # нужен jq
 (`image.version` и `git clone -b 1.36.2`). Набор вариантов из
 `pkg/eol.json` тот же, что в 1.36.1. `Dockerfile.builder-*` не трогаются.
 
+- [ ] `pkg/docker/local/Dockerfile.{minimal,php-8.5,wasm}` (builder-режим
+      `build-local.sh -b`) `make` не генерирует, и в 1.36.0 и 1.36.1 их не
+      обновляли: там до сих пор стоит `1.35.5` в `git clone -b` и
+      `image.version`. `build-local.sh` при сборке подставляет версию сам, но
+      `TODO.md` требует поднимать их на каждом релизе. Проверено: команда
+      меняет 6 строк, и `1.35.5` в этих файлах не остаётся.
+
+```sh
+sed -i -e 's/-b 1\.35\.5 /-b 1.36.2 /' \
+       -e 's/image\.version="1\.35\.5"/image.version="1.36.2"/' \
+       pkg/docker/local/Dockerfile.*
+```
+
+Примеры `-v 1.35.2` в `build-local.sh` и `pkg/docker/README.md` — это только
+документация, их можно не трогать. `Dockerfile.builder-*` версию не содержат.
+
 Коммит: `chore(docker): regenerate Dockerfiles for 1.36.2`.
 
 ## 6. Проверка перед merge
@@ -177,6 +194,7 @@ sed -n '3p' docs/unit-openapi.yaml
 # вывод должен быть пустым:
 grep -rn --exclude-dir=.git -I '1\.36\.1' . \
   | grep -vE '^\./(CHANGES|docs/changes\.xml|tools/unitctl/CHANGELOG\.md|PRE-1\.36\.2\.md):'
+grep -rn -E '(-b |version=")1\.3[0-9]\.[0-9]+' pkg/docker/local/ | grep -v '1\.36\.2'
 # в changelog'ах deb и rpm сверху должна стоять 1.36.2:
 make -C docs ../build/unit.deb-changelog ../build/unit-php8.3.deb-changelog ../build/unit.rpm-changelog
 ```
