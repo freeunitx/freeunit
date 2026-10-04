@@ -175,21 +175,25 @@ git checkout php-8.5.11  # Latest stable 8.5
 ./buildconf --force
 ./configure --prefix=/opt/php-8.5 \
     --with-config-file-path=/etc/php/8.5 \
-    --enable-fpm --enable-cli --enable-cgi \
+    --enable-fpm --enable-cli --enable-cgi --enable-embed \
     --enable-mbstring \
     --with-curl --with-openssl --with-zlib --with-sodium \
     --with-mysqli=mysqlnd --with-pdo-mysql=mysqlnd \
     --enable-xml
 
-make -j$(nproc)
+make clean && make -j$(nproc)
 sudo make install
 
 # Verify custom PHP installation
 /opt/php-8.5/bin/php -v
 # Output: PHP 8.5.11 (cli) ...
 
-# Update system symlink (optional — if you want it as default)
-# sudo ln -sf /opt/php-8.5/bin/php /usr/local/bin/php
+# Verify embed SAPI library was built
+ls -lh /opt/php-8.5/lib/libphp.so
+# Output: -rw-r--r-- libphp.so (shared object)
+
+# Update system libphp symlink to use PHP 8.5 (required for FreeUnit module)
+sudo ln -sf /opt/php-8.5/lib/libphp.so /lib/libphp.so
 
 # Build FreeUnit module against PHP 8.5
 cd ../freeunit
@@ -197,19 +201,29 @@ cd ../freeunit
 make -j$(nproc) php
 sudo make php-install
 
-# Verify module was built against PHP 8.5
+# Verify module was built and linked against PHP 8.5
 ls -lh /usr/lib/x86_64-linux-gnu/unit/modules/php.unit.so
 ldd /usr/lib/x86_64-linux-gnu/unit/modules/php.unit.so | grep libphp
-# Output: libphp.so.8.5 => /opt/php-8.5/lib/libphp.so.8.5
+# Output: libphp.so => /lib/libphp.so -> /opt/php-8.5/lib/libphp.so
+
+# Restart FreeUnit daemon to load the new module
+sudo pkill unitd
+sleep 1
+sudo /path/to/unitd --no-daemon &
 ```
 
-**Build notes (October 2026):**
-- PHP 8.5.11 source build: ~8 min on 8 CPU cores
-- CLI binary: 68M (sapi/cli/php)
-- Verified working configure flags: `--enable-fpm`, `--enable-cli`, `--enable-cgi`, `--enable-mbstring`, `--with-openssl`, `--with-zlib`, `--with-curl`, `--with-mysqli`, `--enable-xml`
-  > **Note:** `--enable-embedded` and `--enable-opcache` flags were removed/deprecated in PHP 8.5; use current PHP configure options
+**Build notes (October 2026, verified on Debian 13):**
+- **CRITICAL:** `--enable-embed` flag is **required** for FreeUnit module (PHP 8.5 renamed this flag from `--enable-embedded` in PHP 8.4)
+- PHP 8.5.11 source build: ~3 min (incremental make), ~8 min (full clean build) on 8 CPU cores
+- CLI binary: 70M (sapi/cli/php, debug symbols included)
+- Verified working configure flags for FreeUnit: `--enable-fpm`, `--enable-cli`, `--enable-cgi`, **`--enable-embed`**, `--enable-mbstring`, `--with-openssl`, `--with-zlib`, `--with-curl`, `--with-mysqli`, `--enable-xml`
+- Embed SAPI library: `/opt/php-8.5/lib/libphp.so` (created by `--enable-embed`)
 - Required build dependencies: `libxml2-dev`, `libcurl4-openssl-dev`, `liboniguruma-dev`, `libsodium-dev`, `autoconf`, `automake`, `libtool`, `pkg-config`, `bison`, `re2c`
-- For FreeUnit embed module: use `--config=/path/to/php-src/scripts/php-config` after making php-config executable
+- **System symlink setup:** FreeUnit dynamically loads `libphp.so` at runtime. If you build multiple PHP versions, update `/lib/libphp.so` symlink to point to the desired version.
+
+**Troubleshooting:**
+- `no PHP embed SAPI found` → Add `--enable-embed` to configure and rebuild
+- FreeUnit shows old PHP version → Check `/lib/libphp.so` symlink with `ls -la /lib/libphp.so` and `ldd /usr/lib/x86_64-linux-gnu/unit/modules/php.unit.so`
 
 **Comparison with CentOS/AlmaLinux:**
 - **CentOS/AlmaLinux:** Use Remi repository (`dnf enable php:remi-8.5`)
@@ -425,9 +439,15 @@ curl -X PUT --unix-socket /run/unit/control.sock http://localhost/config << 'EOF
 }
 EOF
 
-# 4. Test (verified October 2026 with PHP 8.4.26)
+# 4. Test (verified October 2026 with PHP 8.5.11)
 curl http://chi.holder.ru:8080/phpinfo.php
+# Expected output: PHP Version 8.5.11 (or your configured PHP version)
 ```
+
+**Local testing notes (October 5, 2026):**
+- Successfully tested chi.holder.ru with PHP 8.5.11 built from source
+- FreeUnit module dynamically loads libphp.so at startup — ensure `/lib/libphp.so` points to correct PHP version
+- Testing verified: phpinfo() displays correct PHP version (8.5.11)
 
 ## Logs
 
@@ -563,4 +583,29 @@ export LD_LIBRARY_PATH=/opt/php-8.5/lib:$LD_LIBRARY_PATH
 ./configure php --config=/opt/php-8.5/bin/php-config
 make php
 sudo make php-install
+```
+
+**FreeUnit showing wrong PHP version after module build:**
+```bash
+# Problem: Module built against PHP 8.5 but FreeUnit shows PHP 8.4 in phpinfo()
+# Root cause: /lib/libphp.so still points to old PHP version
+
+# Verify which libphp library the module is using:
+ldd /usr/lib/x86_64-linux-gnu/unit/modules/php.unit.so | grep libphp
+# Output should show: libphp.so => /lib/libphp.so
+
+# Check what /lib/libphp.so currently points to:
+ls -la /lib/libphp.so
+# If it shows: libphp.so -> libphp8.4.so (old version)
+
+# Update the symlink to the new PHP version:
+sudo ln -sf /opt/php-8.5/lib/libphp.so /lib/libphp.so
+
+# Restart FreeUnit daemon:
+sudo pkill unitd
+sleep 1
+sudo /usr/sbin/unitd --no-daemon &
+
+# Verify phpinfo() now shows correct PHP version
+curl http://localhost:8080/phpinfo.php | grep "PHP Version"
 ```
