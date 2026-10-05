@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "freeunit",
+  "project_id": "4c70585b-a76f-484d-85d6-da9fd7e6e898"
+}
