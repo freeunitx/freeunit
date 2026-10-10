@@ -84,6 +84,7 @@ typedef struct {
     nxt_tstr_state_t     *tstr_state;
     nxt_mp_t             *conf_pool;
     nxt_uint_t           ver;
+    uint8_t              restored;    /* 1 bit: the stored configuration. */
     nxt_conf_vldt_path_t *path;       /* Stack (top = deepest segment). */
     nxt_str_t            pointer;     /* RFC 6901 pointer at error site. */
     nxt_str_t            suggestion;  /* "Did you mean X" member name. */
@@ -119,6 +120,12 @@ nxt_conf_value_t *nxt_conf_json_parse(nxt_mp_t *mp, u_char *start, u_char *end,
 #define nxt_conf_json_parse_str(mp, str)                                      \
     nxt_conf_json_parse(mp, (str)->start, (str)->start + (str)->length, NULL)
 
+/*
+ * nxt_conf_json_length() returns SIZE_MAX if the length does not fit in
+ * size_t.  No allocation of SIZE_MAX bytes succeeds.  A caller that adds to
+ * the length uses nxt_size_add().  A caller that sizes a shared memory
+ * segment with it refuses SIZE_MAX.
+ */
 size_t nxt_conf_json_length(const nxt_conf_value_t *value,
     nxt_conf_json_pretty_t *pretty);
 u_char *nxt_conf_json_print(u_char *p, const nxt_conf_value_t *value,

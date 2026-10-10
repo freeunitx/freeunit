@@ -595,9 +595,6 @@ nxt_h1p_conn_request_init(nxt_task_t *task, void *obj, void *data)
             h1p->parser.discard_unsafe_fields = skcf->discard_unsafe_fields;
 
             nxt_h1p_conn_request_header_parse(task, c, h1p);
-
-            NXT_OTEL_TRACE();
-
             return;
         }
 
@@ -2028,6 +2025,17 @@ nxt_h1p_conn_request_error(nxt_task_t *task, void *obj, void *data)
     if (r->status == 0) {
         r->status = NXT_HTTP_BAD_REQUEST;
     }
+
+#if (NXT_HAVE_OTEL)
+    /*
+     * The request started, but the connection failed while the body was
+     * read.  Add the request attributes before the span is ended by the
+     * pool cleanup.  A request whose header is not complete has no span.
+     */
+    if (r->otel != NULL && r->otel->status == NXT_OTEL_HEADER_STATE) {
+        NXT_OTEL_TRACE();
+    }
+#endif
 
     nxt_h1p_request_error(task, h1p, r);
 }
@@ -3566,14 +3574,8 @@ nxt_h1p_peer_body_process(nxt_task_t *task, nxt_http_peer_t *peer,
     } else if (h1p->remainder > 0) {
         length = nxt_buf_chain_length(out);
 
-        /*
-         * Cast to nxt_off_t can wrap to negative on 64-bit if length
-         * exceeds NXT_OFF_T_MAX; check that explicitly as well as the
-         * overrun condition.
-         */
-        if (nxt_slow_path((nxt_off_t) length < 0
-                          || (nxt_off_t) length > h1p->remainder))
-        {
+        /* Compare as uint64_t: "length" may exceed NXT_OFF_T_MAX on 64-bit. */
+        if (nxt_slow_path((uint64_t) length > (uint64_t) h1p->remainder)) {
             nxt_buf_t         *b, *tail, *next;
             size_t            trimmed;
             nxt_work_queue_t  *wq;

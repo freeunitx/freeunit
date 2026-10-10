@@ -12,6 +12,7 @@
 #include <nxt_status.h>
 #include <nxt_cert.h>
 #include <nxt_script.h>
+#include <nxt_checked.h>
 
 
 typedef struct {
@@ -236,7 +237,10 @@ nxt_controller_prefork(nxt_task_t *task, nxt_process_t *process, nxt_mp_t *mp)
         }
 
         if (ret == NXT_OK) {
-            num = nxt_int_parse(ver.start, ver.length);
+            /* unitd writes no line end, but an editor may add one. */
+            num = nxt_int_parse(ver.start,
+                                nxt_str_strip(ver.start,
+                                              ver.start + ver.length));
 
             if (nxt_slow_path(num < 0)) {
                 nxt_alert(task, "failed to restore previous configuration: "
@@ -409,6 +413,12 @@ nxt_controller_start(nxt_task_t *task, nxt_process_data_t *data)
     vldt.conf = conf;
     vldt.conf_pool = mp;
     vldt.ver = nxt_conf_ver;
+
+    /*
+     * nxt_conf_vldt_app_shm() keeps a stored "shm" that is out of
+     * range.
+     */
+    vldt.restored = 1;
 
     /*
      * A state file written before this check existed can hold bytes the
@@ -690,6 +700,9 @@ nxt_controller_conf_send(nxt_task_t *task, nxt_mp_t *mp, nxt_conf_value_t *conf,
     controller_port = rt->port_by_type[NXT_PROCESS_CONTROLLER];
 
     size = nxt_conf_json_length(conf, NULL);
+    if (nxt_slow_path(size == SIZE_MAX)) {
+        return NXT_ERROR;
+    }
 
     b = nxt_buf_mem_alloc(mp, sizeof(size_t), 0);
     if (nxt_slow_path(b == NULL)) {
@@ -3076,6 +3089,9 @@ nxt_controller_conf_store(nxt_task_t *task, nxt_conf_value_t *conf)
     main_port = rt->port_by_type[NXT_PROCESS_MAIN];
 
     size = nxt_conf_json_length(conf, NULL);
+    if (nxt_slow_path(size == SIZE_MAX)) {
+        return;
+    }
 
     fd = nxt_shm_open(task, size);
     if (nxt_slow_path(fd == -1)) {
@@ -3267,7 +3283,14 @@ nxt_controller_response(nxt_task_t *task, nxt_controller_request_t *req,
 
     nxt_memzero(&pretty, sizeof(nxt_conf_json_pretty_t));
 
-    size = nxt_conf_json_length(value, &pretty) + 2;
+    /* The body and "\r\n". */
+    if (nxt_slow_path(nxt_size_add(nxt_conf_json_length(value, &pretty), 2,
+                                   &size)
+                      != 0))
+    {
+        nxt_controller_conn_close(task, c, req);
+        return;
+    }
 
     body = nxt_buf_mem_alloc(c->mem_pool, size, 0);
     if (nxt_slow_path(body == NULL)) {

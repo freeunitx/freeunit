@@ -34,6 +34,11 @@
 #include <sys/syscall.h>
 #include <sys/wait.h>
 
+#if (NXT_MACOSX)
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#endif
+
 
 /* What the request handler does with a request that arrived. */
 typedef enum {
@@ -60,6 +65,8 @@ static int                      nxt_unit_msg_test_handler_ok;
 static int                      nxt_unit_msg_test_ws_calls;
 static int                      nxt_unit_msg_test_ws_ok;
 static int                      nxt_unit_msg_test_close_calls;
+static char                     nxt_unit_msg_test_ws_order[8];
+static size_t                   nxt_unit_msg_test_ws_norder;
 static nxt_unit_msg_test_mode_t nxt_unit_msg_test_mode;
 static pid_t                    nxt_unit_msg_test_pid;
 static nxt_unit_ctx_t           *nxt_unit_msg_test_ctx;
@@ -180,6 +187,13 @@ nxt_unit_msg_test_websocket(nxt_unit_websocket_frame_t *ws)
 
     nxt_unit_msg_test_ws_ok = ws->payload_len == 3 && n == 3
                               && memcmp(buf, "abc", 3) == 0;
+
+    /* The first payload byte of each frame, in the order of the calls. */
+    if (n > 0 && nxt_unit_msg_test_ws_norder
+                 < sizeof(nxt_unit_msg_test_ws_order) - 1)
+    {
+        nxt_unit_msg_test_ws_order[nxt_unit_msg_test_ws_norder++] = buf[0];
+    }
 
     nxt_unit_websocket_done(ws);
 }
@@ -414,8 +428,17 @@ static const nxt_unit_msg_test_segment_t  segments[] = {
       NXT_UNIT_ERROR },
     { "segment shorter than PORT_MMAP_SIZE is refused",
       PORT_MMAP_HEADER_SIZE, 1, NXT_UNIT_ERROR },
-    { "segment longer than PORT_MMAP_SIZE is refused",
-      2 * PORT_MMAP_SIZE, 1, NXT_UNIT_ERROR },
+    /*
+     * A whole 64 KiB page short: macOS rounds a shm object up to a page,
+     * so a one-byte gap would vanish there.  10424320 rounds up to at most
+     * 10485760 for any page up to 64 KiB, still below PORT_MMAP_SIZE.
+     */
+    { "segment 64 KiB shorter than PORT_MMAP_SIZE is refused",
+      PORT_MMAP_SIZE - 65536, 1, NXT_UNIT_ERROR },
+    { "segment rounded up to a 16 KiB page is accepted",
+      (PORT_MMAP_SIZE + 16383) & ~(size_t) 16383, 1, NXT_UNIT_OK },
+    { "segment longer than PORT_MMAP_SIZE is accepted",
+      2 * PORT_MMAP_SIZE, 1, NXT_UNIT_OK },
 };
 
 
@@ -545,6 +568,7 @@ nxt_unit_msg_test_get_mmap_follower_case(void *data)
 static int
 nxt_unit_msg_test_count_maps(void)
 {
+#if (NXT_LINUX)
     int   n;
     char  line[512];
     FILE  *f;
@@ -563,6 +587,61 @@ nxt_unit_msg_test_count_maps(void)
     fclose(f);
 
     return n;
+
+#elif (NXT_MACOSX)
+    int                             n;
+    kern_return_t                   kr;
+    mach_port_t                     object;
+    mach_vm_size_t                  size, page;
+    mach_vm_address_t               address;
+    mach_msg_type_number_t          count;
+    vm_region_basic_info_data_64_t  info;
+
+    /*
+     * Count the regions of exactly one segment, PORT_MMAP_SIZE rounded up
+     * to a page.  The share mode cannot identify them: a segment that is
+     * mapped but not touched reports SM_PRIVATE.
+     */
+
+    page = getpagesize();
+    address = 0;
+    n = 0;
+
+    for ( ;; ) {
+        count = VM_REGION_BASIC_INFO_COUNT_64;
+
+        kr = mach_vm_region(mach_task_self(), &address, &size,
+                            VM_REGION_BASIC_INFO_64,
+                            (vm_region_info_t) &info, &count, &object);
+
+        if (kr == KERN_INVALID_ADDRESS) {
+            break;
+        }
+
+        if (kr != KERN_SUCCESS) {
+            return -1;
+        }
+
+        if (object != MACH_PORT_NULL) {
+            mach_port_deallocate(mach_task_self(), object);
+        }
+
+        if (size >= PORT_MMAP_SIZE && size < PORT_MMAP_SIZE + page) {
+            n++;
+        }
+
+        if (size == 0 || address + size < address) {
+            break;
+        }
+
+        address += size;
+    }
+
+    return n;
+
+#else
+    return -1;
+#endif
 }
 
 
@@ -582,6 +661,16 @@ nxt_unit_msg_test_dup_id_case(void *data)
     }
 
     after = nxt_unit_msg_test_count_maps();
+
+#if !(NXT_LINUX || NXT_MACOSX)
+    if (before < 0) {
+        /* No mapping count method available on this platform. */
+        printf("unit msg test: mapping count skipped, "
+               "no mapping count method\n");
+        before = 0;
+        after = 0;
+    }
+#endif
 
     if (before < 0 || after != before) {
         printf("unit msg test: %d segment mappings, was %d\n", after, before);
@@ -1170,6 +1259,238 @@ nxt_unit_msg_test_websocket_case(void *data)
 }
 
 
+/* A masked one-byte text frame, as the router puts it into a chunk. */
+static void
+nxt_unit_msg_test_write_frame(u_char *p, u_char c)
+{
+    static const u_char  mask[4] = { 0x10, 0x20, 0x30, 0x40 };
+
+    p[0] = 0x81;
+    p[1] = 0x80 | 1;
+    memcpy(p + 2, mask, 4);
+    p[6] = c ^ mask[0];
+}
+
+
+/*
+ * A websocket frame message with one record over "chunk" of "mmap_id".  With
+ * "shared", it is processed at once, as from the shared port.
+ */
+static int
+nxt_unit_msg_test_send_frame_via(uint32_t mmap_id, nxt_chunk_id_t chunk,
+    int shared)
+{
+    u_char               buf[sizeof(nxt_port_msg_t)
+                             + sizeof(nxt_port_mmap_msg_t)];
+    nxt_port_msg_t       msg;
+    nxt_port_mmap_msg_t  rec;
+
+    memset(&msg, 0, sizeof(msg));
+
+    msg.stream = NXT_UNIT_MSG_TEST_STREAM;
+    msg.pid = nxt_unit_msg_test_pid;
+    msg.reply_port = nxt_unit_msg_test_reply_port;
+    msg.type = _NXT_PORT_MSG_WEBSOCKET;
+    msg.mmap = 1;
+
+    rec.mmap_id = mmap_id;
+    rec.chunk_id = chunk;
+    rec.size = 7;
+
+    memcpy(buf, &msg, sizeof(msg));
+    memcpy(buf + sizeof(msg), &rec, sizeof(rec));
+
+    if (shared) {
+        return nxt_unit_test_process_shared_msg(nxt_unit_msg_test_ctx, buf,
+                                                sizeof(buf), -1);
+    }
+
+    return nxt_unit_test_process_msg(nxt_unit_msg_test_ctx, buf, sizeof(buf),
+                                     -1);
+}
+
+
+static int
+nxt_unit_msg_test_send_frame(uint32_t mmap_id, nxt_chunk_id_t chunk)
+{
+    return nxt_unit_msg_test_send_frame_via(mmap_id, chunk, 0);
+}
+
+
+/*
+ * The router puts frames "a" and "c" into segment 1, which libunit has not
+ * mapped yet, and frame "b" between them into segment 0.  libunit parks
+ * "a" and asks for segment 1.  It processed "b" at once, ahead of "a", and
+ * parked "c" behind "a".  When the segment came, it replayed the parked
+ * frames in reverse.  The application got "bca" and not "abc": in a
+ * fragmented message, the FIN fragment came before the frames still
+ * parked, and the message was short.
+ */
+static int
+nxt_unit_msg_test_ws_order_case(void *data)
+{
+    int                     rc, fd;
+    u_char                  *p;
+    nxt_port_msg_t          msg;
+    nxt_port_mmap_header_t  *hdr;
+
+    nxt_unit_msg_test_mode = NXT_UNIT_MSG_TEST_UPGRADE;
+
+    rc = nxt_unit_msg_test_send_request(2, nxt_unit_msg_test_edit_handshake);
+
+    if (rc != NXT_UNIT_OK || nxt_unit_msg_test_handler_calls != 1
+        || !nxt_unit_msg_test_handler_ok)
+    {
+        printf("unit msg test: upgrade failed: %d\n", rc);
+        return 1;
+    }
+
+    fd = nxt_unit_msg_test_shm(PORT_MMAP_SIZE);
+    if (fd == -1) {
+        return 2;
+    }
+
+    hdr = mmap(NULL, PORT_MMAP_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd,
+               0);
+    if (hdr == MAP_FAILED) {
+        perror("mmap");
+        return 2;
+    }
+
+    hdr->id = 1;
+    hdr->src_pid = getpid();
+    hdr->dst_pid = getpid();
+
+    nxt_unit_msg_test_write_frame(nxt_port_mmap_chunk_start(hdr, 0), 'a');
+    nxt_unit_msg_test_write_frame(nxt_port_mmap_chunk_start(hdr, 1), 'c');
+
+    p = nxt_port_mmap_chunk_start(nxt_unit_msg_test_seg0, 3);
+    nxt_unit_msg_test_write_frame(p, 'b');
+
+    nxt_unit_msg_test_ws_norder = 0;
+
+    if (nxt_unit_msg_test_send_frame(1, 0) == NXT_UNIT_ERROR
+        || nxt_unit_msg_test_send_frame(0, 3) == NXT_UNIT_ERROR
+        || nxt_unit_msg_test_send_frame(1, 1) == NXT_UNIT_ERROR)
+    {
+        return 3;
+    }
+
+    /* The router's answer to the GET_MMAP. */
+    memset(&msg, 0, sizeof(msg));
+
+    msg.pid = getpid();
+    msg.type = _NXT_PORT_MSG_MMAP;
+    msg.last = 1;
+
+    rc = nxt_unit_test_process_msg(nxt_unit_msg_test_ctx, &msg, sizeof(msg),
+                                   fd);
+
+    nxt_unit_msg_test_ws_order[nxt_unit_msg_test_ws_norder] = '\0';
+
+    if (rc != NXT_UNIT_OK
+        || strcmp(nxt_unit_msg_test_ws_order, "abc") != 0)
+    {
+        printf("unit msg test: frames came as \"%s\", expected \"abc\": "
+               "rc %d\n", nxt_unit_msg_test_ws_order, rc);
+
+        /* The child ends with _exit(), which does not flush stdout. */
+        fflush(stdout);
+
+        return 4;
+    }
+
+    return NXT_UNIT_MSG_TEST_RC(NXT_UNIT_OK);
+}
+
+
+/*
+ * nxt_unit_run_shared() and nxt_unit_dequeue_request() process a message
+ * at once, so a context can have more than one buffer parked on a segment.
+ * Here frames "a" and "b" both wait for segment 1.  nxt_unit_unpark_rbufs()
+ * put each one at the head of pending_rbuf, so they were replayed as "ba".
+ * It now walks from the tail, and they keep their order.
+ */
+static int
+nxt_unit_msg_test_ws_unpark_case(void *data)
+{
+    int                     rc, fd;
+    nxt_port_msg_t          msg;
+    nxt_port_mmap_header_t  *hdr;
+
+    nxt_unit_msg_test_mode = NXT_UNIT_MSG_TEST_UPGRADE;
+
+    rc = nxt_unit_msg_test_send_request(2, nxt_unit_msg_test_edit_handshake);
+
+    if (rc != NXT_UNIT_OK || nxt_unit_msg_test_handler_calls != 1
+        || !nxt_unit_msg_test_handler_ok)
+    {
+        printf("unit msg test: upgrade failed: %d\n", rc);
+        return 1;
+    }
+
+    fd = nxt_unit_msg_test_shm(PORT_MMAP_SIZE);
+    if (fd == -1) {
+        return 2;
+    }
+
+    hdr = mmap(NULL, PORT_MMAP_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd,
+               0);
+    if (hdr == MAP_FAILED) {
+        perror("mmap");
+        return 2;
+    }
+
+    hdr->id = 1;
+    hdr->src_pid = getpid();
+    hdr->dst_pid = getpid();
+
+    nxt_unit_msg_test_write_frame(nxt_port_mmap_chunk_start(hdr, 0), 'a');
+    nxt_unit_msg_test_write_frame(nxt_port_mmap_chunk_start(hdr, 1), 'b');
+
+    nxt_unit_msg_test_ws_norder = 0;
+
+    if (nxt_unit_msg_test_send_frame_via(1, 0, 1) == NXT_UNIT_ERROR
+        || nxt_unit_msg_test_send_frame_via(1, 1, 1) == NXT_UNIT_ERROR)
+    {
+        return 3;
+    }
+
+    if (nxt_unit_msg_test_ws_norder != 0) {
+        printf("unit msg test: a frame was processed before its segment\n");
+        fflush(stdout);
+
+        return 3;
+    }
+
+    /* The router's answer to the GET_MMAP. */
+    memset(&msg, 0, sizeof(msg));
+
+    msg.pid = getpid();
+    msg.type = _NXT_PORT_MSG_MMAP;
+    msg.last = 1;
+
+    rc = nxt_unit_test_process_msg(nxt_unit_msg_test_ctx, &msg, sizeof(msg),
+                                   fd);
+
+    nxt_unit_msg_test_ws_order[nxt_unit_msg_test_ws_norder] = '\0';
+
+    if (rc != NXT_UNIT_OK
+        || strcmp(nxt_unit_msg_test_ws_order, "ab") != 0)
+    {
+        printf("unit msg test: parked frames came as \"%s\", expected "
+               "\"ab\": rc %d\n", nxt_unit_msg_test_ws_order, rc);
+
+        /* The child ends with _exit(), which does not flush stdout. */
+        fflush(stdout);
+
+        return 4;
+    }
+
+    return NXT_UNIT_MSG_TEST_RC(NXT_UNIT_OK);
+}
+
+
 int
 main(void)
 {
@@ -1322,6 +1643,16 @@ main(void)
     nxt_unit_msg_test_in_child("truncated websocket frame is refused",
                                nxt_unit_msg_test_websocket_case,
                                (void *) &short_frame, NXT_UNIT_OK);
+
+    nxt_unit_msg_test_in_child("websocket frames keep their order across "
+                               "a segment wait",
+                               nxt_unit_msg_test_ws_order_case, NULL,
+                               NXT_UNIT_OK);
+
+    nxt_unit_msg_test_in_child("parked websocket frames keep their order "
+                               "when the segment comes",
+                               nxt_unit_msg_test_ws_unpark_case, NULL,
+                               NXT_UNIT_OK);
 
     /*
      * Release the library.  Otherwise the global context pointer keeps it

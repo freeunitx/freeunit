@@ -70,15 +70,18 @@ nxt_int_t nxt_buf_test(nxt_thread_t *thr);
 nxt_int_t nxt_http_chunk_parse_test(nxt_thread_t *thr);
 nxt_int_t nxt_http_validate_host_test(nxt_thread_t *thr);
 nxt_int_t nxt_http_request_body_alloc_test(nxt_thread_t *thr);
+nxt_int_t nxt_http_comp_select_test(nxt_thread_t *thr);
 nxt_int_t nxt_conf_json_depth_test(nxt_thread_t *thr);
 nxt_int_t nxt_http_route_addr_test(nxt_thread_t *thr);
 nxt_int_t nxt_conf_map_object_test(nxt_thread_t *thr);
+nxt_int_t nxt_conf_map_bound_test(nxt_thread_t *thr);
 nxt_int_t nxt_port_fail_test(nxt_thread_t *thr);
 nxt_int_t nxt_fd_event_change_test(nxt_thread_t *thr);
 nxt_int_t nxt_port_use_unless_zero_test(nxt_thread_t *thr);
 nxt_int_t nxt_port_mmap_range_test(nxt_thread_t *thr);
 nxt_int_t nxt_port_mmap_read_test(nxt_thread_t *thr);
 nxt_int_t nxt_port_mmaps_max_test(nxt_thread_t *thr);
+nxt_int_t nxt_port_mmap_size_test(nxt_thread_t *thr);
 nxt_int_t nxt_port_ready_test(nxt_thread_t *thr);
 nxt_int_t nxt_conn_close_idle_test(nxt_thread_t *thr);
 nxt_int_t nxt_listen_event_test(nxt_thread_t *thr);
@@ -115,6 +118,7 @@ nxt_int_t nxt_router_response_parse_test(nxt_thread_t *thr);
 nxt_int_t nxt_port_frag_test(nxt_thread_t *thr);
 nxt_int_t nxt_port_release_test(nxt_thread_t *thr);
 nxt_int_t nxt_nncq_bound_test(nxt_thread_t *thr);
+nxt_int_t nxt_size_bound_test(nxt_thread_t *thr);
 #if (NXT_HAVE_REGEX)
 nxt_int_t nxt_regex_test(nxt_thread_t *thr);
 #endif
