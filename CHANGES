@@ -1,6 +1,156 @@
 
 Changes with FreeUnit 1.37.1                                     04 Oct 2026
 
+    *) Bugfix: with a 32-bit size_t, the memory pool did not check the sum
+       of a large size, its alignment and its block header. An allocation
+       of 4294967269 to 4294967294 bytes got a block of 0 to 24 bytes. The
+       buffer allocators added their header to a size without a check too,
+       with either width of size_t. These sums now use checked arithmetic,
+       and such an allocation fails. The same is done for the length of a
+       configuration printed as JSON and for the request body buffer. With
+       a negative "body_buffer_size" or "large_header_buffer_size" in the
+       configuration, a request could reach a buffer allocator with such a
+       size.
+
+    *) Bugfix: an application could get the websocket frames of a client
+       in the wrong order. The router puts each frame into shared memory.
+       When it starts a new segment, the application has to ask for it,
+       and libunit kept the frame aside until the segment came. It
+       processed the next frames at once when they were in a segment it
+       already had, and it replayed the frames it kept aside in reverse.
+       A fragmented message could reach the application short, and the
+       connection could then close with a protocol error. Whole messages
+       could swap. This needed a client that sent faster than the
+       application read. The bug had appeared in 1.19.0. The fix is in
+       libunit. Node.js and Python ASGI applications get it. A Node.js
+       application gets it when it is built with the new libunit.
+
+    *) Bugfix: the control API accepted a listener with neither "pass" nor
+       "application". The router then refused the configuration, and the
+       client got 500 "Failed to apply new configuration." with only
+       "failed to apply new conf" in the log. The control API now answers
+       400 and names the listener. The router log also names it.
+
+    *) Bugfix: on macOS with 16 KiB pages, every request to an application
+       failed. The application logged "incoming_mmap: unexpected segment
+       size: 10502144 != 10489856" and exited. macOS rounds a shared memory
+       segment up to a whole page, and 1.37.0 required the exact size. A
+       larger segment is now accepted. A shorter one is still refused. The
+       check in the application appeared in 1.37.0. The same check in the
+       router appeared in 1.36.1 and dropped larger application responses
+       on macOS.
+
+    *) Bugfix: with OpenTelemetry, the inbound "traceparent" was ignored
+       when the request header arrived in more than one read. The span
+       started after the first read, before the header was parsed, so it
+       got a new trace ID. The span now starts after the whole header is
+       parsed, with the arrival of the request as its start time. The span
+       of a request that fails before it is complete, such as a 400 or a
+       408, now has the request attributes. The bug had appeared in 1.34.0.
+
+    *) Bugfix: with "chunked_transform", a valid chunked request body got
+       400 when a read ended right after the data of a chunk, before the
+       CRLF after it. The data stayed in the read buffer, and the next read
+       was parsed after it. So the result depended on how the client's
+       writes reached the server. The bug had appeared in 1.35.5.
+
+    *) Bugfix: unitd did not load the stored configuration when the
+       "version" file in the state directory ended with a line end, as
+       "echo 13700 > version" and most editors write it. It logged
+       "invalid version string" and started with no configuration. A line
+       end, a space or a tab after the number is now ignored. Any other
+       content is still an error. unitd itself writes the file with no
+       line end. The bug had appeared in 1.26.0.
+
+    *) Change: "--otel" no longer needs OpenSSL. Before, configure
+       stopped with "OpenTelemetry support requires OpenSSL." when the
+       OpenSSL headers were missing, and it linked unitd with OpenSSL
+       even without "--openssl". The OTel exporter has linked no TLS
+       stack since 1.36.0. macOS builds did not have the problem.
+
+    *) Bugfix: the worker of a wasm application crashed when the guest
+       called the import nxt_wasm_send_response, nxt_wasm_send_headers or
+       nxt_wasm_response_end before the first request. This could happen
+       in the start function or "_initialize" of the guest, in the malloc
+       handler, or in the module_init hook. These imports now trap when
+       the worker has no request yet. The worker then does not start,
+       except in the hook, where the trap ends only the hook.
+
+    *) Bugfix: the wasm module took any export with a handler name as a
+       function. If that export was not a function, such as a global or
+       a memory, the worker crashed on the first call of the handler. The
+       module now refuses such a guest when the worker starts.
+
+    *) Bugfix: with "large_header_buffers" set to 256 or more, the limit
+       did not work. The router counted the large buffers of a request
+       header in 8 bits, so the count went back to 0 after 255. A request
+       header with many fields could then take memory until
+       "header_read_timeout" ended it. The bug had appeared in 1.29.0.
+
+    *) Bugfix: on 64-bit platforms, the "shm" limit of an application
+       was cut to its low 32 bits. libunit takes it as a 32-bit number.
+       So 4294967296 gave the smallest limit, one segment of 10 MiB. A
+       value from 4284481537 to 4294967295 also gave one segment, because
+       the rounding to whole segments wrapped. The control API now
+       refuses a "shm" over 4294967295 or below 0. A stored configuration
+       with such a value is still loaded, with a warning. On a 64-bit
+       platform the application gets a limit of 4294967295. The bug had
+       appeared in 1.14.0.
+
+    *) Bugfix: a PHP target with "script" ran in a stale working directory
+       after the directory of the script was replaced. The module changed
+       the directory only when a request came for another target. When a
+       new tree was renamed into place while unitd ran, the script was
+       opened from the new tree, but relative includes and file reads used
+       the old tree. Deploys that rename a release directory into place
+       were affected. The directory is now set on every request, as for
+       targets with "root" only. This costs one chdir() call per request.
+       The bug had appeared in 1.16.0.
+
+    *) Bugfix: the control API accepted any integer for the timeouts in
+       "settings/http", in "settings/http/websocket" and for "timeout" in
+       "limits" of an application. A negative timeout had no defined value.
+       A timeout above 2147483 seconds fired at once. They are now refused
+       out of the range 0 to 2147483 seconds, as "start_timeout" is. A
+       stored configuration with such a value still loads, with a warning,
+       and the timer fires at once, as a negative value did before on x86.
+       Numbers out of the range of an integer option now fail the
+       configuration instead of giving an undefined value. "requests" in
+       "limits" and "thread_stack_size" are now refused above 2147483647,
+       and "requests" below 0. See
+       https://github.com/freeunitorg/freeunit/issues/619.
+
+    *) Bugfix: Unit could not be built with gcc on 32-bit platforms, such
+       as Debian i386. The compiler stopped on
+       src/nxt_h1proto.c with "comparison is always false due to limited
+       range of data type [-Werror=type-limits]". Builds with clang were
+       not affected. The bug had appeared in 1.36.0.
+
+    *) Bugfix: an application worker whose WHOAMI the main process refused
+       was not told so. It waited for a reply for ever and stayed alive
+       until its prototype quit. This happens when a host pid is reused
+       while main still has the record of the old worker. On Linux, main
+       now answers a refused WHOAMI with an error, and also when it cannot
+       send the reply to an accepted one. The worker logs "WHOAMI failed,
+       exiting" and exits, and main logs the reason. On other platforms a
+       refused worker still waits, as before. Main also refuses a WHOAMI
+       for a record that is still linked to a prototype. The bug had
+       appeared in 1.37.0.
+
+    *) Bugfix: on 32-bit platforms, the "min_length" option of a compressor
+       did not work. On little-endian platforms, such as x86, armv7 and
+       armhf, a response shorter than "min_length" was compressed, and a
+       client that refused identity got the compressed response instead of
+       a 406. On big-endian platforms, a compressor with "min_length"
+       compressed no response shorter than 4 GiB. The bug had appeared in
+       1.35.0.
+
+    *) Bugfix: on big-endian platforms, such as s390x, the "level" option of
+       a compressor did not work. A positive level became 0, and a negative
+       level became -1. For gzip and deflate, level 0 does not compress. On
+       other platforms, a level above 255 used only its low byte: 265 became
+       9, with no notice. The bug had appeared in 1.35.0.
+
 
 Changes with FreeUnit 1.37.0                                     04 Oct 2026
 

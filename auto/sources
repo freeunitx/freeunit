@@ -182,6 +182,7 @@ NXT_TEST_SRCS=" \
     src/test/nxt_http_chunk_parse_test.c \
     src/test/nxt_http_validate_host_test.c \
     src/test/nxt_http_request_body_alloc_test.c \
+    src/test/nxt_http_comp_select_test.c \
     src/test/nxt_conf_parse_test.c \
     src/test/nxt_port_fail_test.c \
     src/test/nxt_fd_event_change_test.c \
@@ -189,6 +190,7 @@ NXT_TEST_SRCS=" \
     src/test/nxt_port_mmap_range_test.c \
     src/test/nxt_port_mmap_read_test.c \
     src/test/nxt_port_mmaps_max_test.c \
+    src/test/nxt_port_mmap_size_test.c \
     src/test/nxt_port_ready_test.c \
     src/test/nxt_conn_close_idle_test.c \
     src/test/nxt_listen_event_test.c \
@@ -226,6 +228,7 @@ NXT_TEST_SRCS=" \
     src/test/nxt_port_frag_test.c \
     src/test/nxt_port_release_test.c \
     src/test/nxt_nncq_bound_test.c \
+    src/test/nxt_size_bound_test.c \
     src/test/nxt_cpu_limit_test.c \
 "
 

@@ -1,14 +1,20 @@
+import json
 import re
+import shutil
 import socket
 import ssl
 import subprocess
+import tempfile
 import time
+from pathlib import Path
 
 import pytest
-
+from conftest import unit_run, unit_stop
 from unit.applications.lang.python import ApplicationPython
 from unit.applications.tls import ApplicationTLS
 from unit.option import option
+from unit import port as port_map
+from unit.status import Status
 
 prerequisites = {'modules': {'python': 'any'}}
 
@@ -444,7 +450,7 @@ def test_settings_body_min_rate_slow_body(timeout, wait_for_record):
     min_rate_conf({'body_read_timeout': timeout, 'body_min_rate': 256})
 
     try:
-        sock = socket.create_connection(('127.0.0.1', 8080))
+        sock = socket.create_connection(('127.0.0.1', port_map.port(8080)))
         sock.settimeout(1)
         sock.sendall(
             b'POST / HTTP/1.1\r\n'
@@ -485,7 +491,7 @@ def test_settings_body_min_rate_chunked(wait_for_record):
     )
 
     try:
-        sock = socket.create_connection(('127.0.0.1', 8080))
+        sock = socket.create_connection(('127.0.0.1', port_map.port(8080)))
         sock.sendall(
             b'POST / HTTP/1.1\r\n'
             b'Host: localhost\r\n'
@@ -534,7 +540,7 @@ def test_settings_body_min_rate_tls(wait_for_record):
 
     try:
         sock = context.wrap_socket(
-            socket.create_connection(('127.0.0.1', 8080))
+            socket.create_connection(('127.0.0.1', port_map.port(8080)))
         )
         sock.sendall(
             b'POST / HTTP/1.1\r\n'
@@ -568,7 +574,7 @@ def test_settings_body_min_rate_burst_then_slow(wait_for_record):
     min_rate_conf({'body_read_timeout': 2, 'body_min_rate': 256})
 
     try:
-        sock = socket.create_connection(('127.0.0.1', 8080))
+        sock = socket.create_connection(('127.0.0.1', port_map.port(8080)))
         sock.settimeout(1)
         sock.sendall(
             b'POST / HTTP/1.1\r\n'
@@ -621,7 +627,7 @@ def test_settings_body_min_rate_normal_body(timeout):
         return sock.recv(4096)
 
     try:
-        sock = socket.create_connection(('127.0.0.1', 8080))
+        sock = socket.create_connection(('127.0.0.1', port_map.port(8080)))
         sock.settimeout(10)
 
         assert req(sock, False).startswith(b'HTTP/1.1 200'), 'first'
@@ -642,7 +648,7 @@ CONTINUE = b'HTTP/1.1 100 Continue\r\n\r\n'
 def min_rate_expect(length):
     # Sends a header with "Expect: 100-continue" and reads the 100.  The
     # client sends no body byte before it gets the 100.
-    sock = socket.create_connection(('127.0.0.1', 8080))
+    sock = socket.create_connection(('127.0.0.1', port_map.port(8080)))
     sock.sendall(
         b'POST / HTTP/1.1\r\n'
         b'Host: localhost\r\n'
@@ -773,7 +779,7 @@ def test_settings_send_min_rate_slow_read(timeout, system, wait_for_record):
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 262144)
         sock.settimeout(1)
-        sock.connect(('127.0.0.1', 8080))
+        sock.connect(('127.0.0.1', port_map.port(8080)))
         sock.sendall(
             b'GET / HTTP/1.1\r\n'
             b'Host: localhost\r\n'
@@ -852,7 +858,7 @@ def test_settings_send_min_rate_fast_read(timeout):
             assert resp['status'] == 200
             assert len(resp['body']) == 4194304
 
-        sock = socket.create_connection(('127.0.0.1', 8080))
+        sock = socket.create_connection(('127.0.0.1', port_map.port(8080)))
         sock.settimeout(10)
 
         for close in (False, True):
@@ -934,7 +940,7 @@ def test_settings_send_min_rate_gap_longer_than_grace(search_in_file):
 
     min_rate_conf({'send_timeout': 2, 'send_min_rate': 1048576})
 
-    sock = socket.create_connection(('127.0.0.1', 8080))
+    sock = socket.create_connection(('127.0.0.1', port_map.port(8080)))
     sock.settimeout(10)
 
     def response(length):
@@ -1130,6 +1136,102 @@ def test_settings_min_rate_validation():
 
     finally:
         min_rate_reset()
+
+
+TIMEOUTS = (
+    'http/header_read_timeout',
+    'http/body_read_timeout',
+    'http/send_timeout',
+    'http/idle_timeout',
+    'http/websocket/read_timeout',
+    'http/websocket/keepalive_interval',
+)
+
+
+def test_settings_timeout_validation():
+    client.load('empty')
+
+    def put(path, value):
+        conf = value
+        for seg in reversed(path.split('/')):
+            conf = {seg: conf}
+
+        return client.conf(conf, 'settings')
+
+    try:
+        for path in TIMEOUTS:
+            for value in (-1, 2147484, 4294968):
+                assert 'error' in put(path, value), f'{path} {value}'
+
+            assert 'success' in put(path, 0), path
+            assert 'success' in put(path, 2147483), path
+
+        resp = put('http/idle_timeout', -1)
+        assert (
+            resp['detail'] == 'The "idle_timeout" number must not be negative.'
+        ), 'message'
+        assert resp['location']['path'] == '/settings/http/idle_timeout'
+
+        resp = put('http/idle_timeout', 2147484)
+        assert (
+            resp['detail']
+            == 'The "idle_timeout" number must not exceed 2147483.'
+        ), 'message 2'
+
+    finally:
+        # The default no-restart suite preserves /settings between tests.
+        client.conf_delete('settings/http')
+
+
+def test_settings_timeout_stored(
+    requires_restart, wait_for_record, monkeypatch
+):
+    """Earlier versions accepted any timeout.  unitd still loads a stored
+    configuration with one out of the range, and it serves requests."""
+
+    client.load('empty')
+
+    conf = client.conf_get()
+    conf['settings'] = {'http': {'idle_timeout': -1}}
+
+    unit_stop()
+
+    statedir = Path(tempfile.mkdtemp(prefix='unit-state-'))
+    (statedir / 'conf.json').write_text(json.dumps(conf))
+
+    # unit_run() checks that /status lists no application.  The stored
+    # configuration has one.
+    monkeypatch.setattr(Status, '_check_zeros', lambda: None)
+
+    try:
+        unit_run(state_dir=str(statedir))
+
+        assert (
+            client.conf_get('settings/http/idle_timeout') == -1
+        ), 'stored configuration loaded'
+
+        assert wait_for_record(
+            r'\[warn\].+the restored configuration has a '
+            r'"idle_timeout" number out of the range 0 to 2147483 at '
+            r'"/settings/http/idle_timeout"'
+        ), 'warning'
+
+        # The router applied the configuration, so the listener answers.
+        # The idle timer fires at once, as before, so the answer can be
+        # 408.
+        assert client.get()['status'] in (200, 408), 'served'
+
+        resp = client.conf(
+            {'*:8080': {'pass': 'applications/empty'}}, 'listeners'
+        )
+        assert 'error' in resp, 'update refused'
+        assert (
+            resp['location']['path'] == '/settings/http/idle_timeout'
+        ), 'pointer'
+
+    finally:
+        unit_stop()
+        shutil.rmtree(statedir, ignore_errors=True)
 
 
 def test_settings_idle_timeout():

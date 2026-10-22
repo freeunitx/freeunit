@@ -5,6 +5,7 @@
  */
 
 #include <nxt_main.h>
+#include <nxt_application.h>
 #include "nxt_tests.h"
 
 
@@ -73,7 +74,7 @@ nxt_test_in_child(nxt_thread_t *thr, const char *name, int (*fn)(void *),
 static nxt_int_t (*const nxt_security_tests[])(nxt_thread_t *) = {
     nxt_checked_test, nxt_port_mmap_read_test,
     nxt_router_response_parse_test, nxt_port_frag_test,
-    nxt_port_release_test, nxt_nncq_bound_test,
+    nxt_port_release_test, nxt_nncq_bound_test, nxt_size_bound_test,
 #if (NXT_HAVE_REGEX)
     nxt_regex_test,
 #endif
@@ -85,6 +86,45 @@ static nxt_bool_t
 nxt_msec_less(nxt_msec_t first, nxt_msec_t second)
 {
     return (nxt_msec_diff(first, second) < 0);
+}
+
+
+/*
+ * A stored "shm" over UINT32_MAX must not wrap to its low 32 bits.  A stored
+ * -1 is mapped to SIZE_MAX, so the { SIZE_MAX, UINT32_MAX } case covers it.
+ */
+
+static nxt_int_t
+nxt_app_shm_limit_test(nxt_thread_t *thr)
+{
+    size_t      r;
+    nxt_uint_t  i;
+
+    static const struct {
+        size_t  in;
+        size_t  out;
+    } cases[] = {
+        { 0, 0 },
+        { 10 * 1024 * 1024, 10 * 1024 * 1024 },
+        { UINT32_MAX, UINT32_MAX },
+#if (NXT_SIZE_T_SIZE > 4)
+        { (size_t) UINT32_MAX + 1, UINT32_MAX },
+        { (size_t) UINT32_MAX + 10 * 1024 * 1024, UINT32_MAX },
+#endif
+        { SIZE_MAX, UINT32_MAX },
+    };
+
+    for (i = 0; i < nxt_nitems(cases); i++) {
+        r = nxt_app_shm_limit(cases[i].in);
+
+        NXT_TEST_CHECK(thr->log, r == cases[i].out,
+                       "app shm limit test failed: %uz gave %uz, not %uz",
+                       cases[i].in, r, cases[i].out);
+    }
+
+    nxt_log_error(NXT_LOG_NOTICE, thr->log, "app shm limit test passed");
+
+    return NXT_OK;
 }
 
 
@@ -249,6 +289,10 @@ main(int argc, char **argv)
         return 1;
     }
 
+    if (nxt_http_comp_select_test(thr) != NXT_OK) {
+        return 1;
+    }
+
     if (nxt_conf_json_depth_test(thr) != NXT_OK) {
         return 1;
     }
@@ -258,6 +302,10 @@ main(int argc, char **argv)
     }
 
     if (nxt_conf_map_object_test(thr) != NXT_OK) {
+        return 1;
+    }
+
+    if (nxt_conf_map_bound_test(thr) != NXT_OK) {
         return 1;
     }
 
@@ -278,6 +326,10 @@ main(int argc, char **argv)
     }
 
     if (nxt_port_mmaps_max_test(thr) != NXT_OK) {
+        return 1;
+    }
+
+    if (nxt_port_mmap_size_test(thr) != NXT_OK) {
         return 1;
     }
 
@@ -358,6 +410,10 @@ main(int argc, char **argv)
     }
 
     if (nxt_main_start_process_reply_test(thr) != NXT_OK) {
+        return 1;
+    }
+
+    if (nxt_app_shm_limit_test(thr) != NXT_OK) {
         return 1;
     }
 
