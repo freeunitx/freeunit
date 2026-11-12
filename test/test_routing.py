@@ -1,8 +1,17 @@
 # -*- coding: utf-8 -*-
+import json
+import shutil
+import socket
+import tempfile
+from pathlib import Path
+
 import pytest
 
+from conftest import unit_run, unit_stop
 from unit.applications.lang.python import ApplicationPython
 from unit.option import option
+from unit.status import Status
+from unit import port as port_map
 
 prerequisites = {'modules': {'python': 'any'}}
 
@@ -351,6 +360,52 @@ def test_routes_regex_match_limit_unanchored(require, wait_for_record):
     ), 'short subject'
 
 
+def test_routes_regex_match_limit_reuse(require, wait_for_record, findall):
+    require({'modules': {'regex': True}})
+
+    # One match object serves the whole router thread, reused across requests.
+    # Pin one thread so the reuse and the once-per-pattern warning are
+    # deterministic.
+    assert 'success' in client.conf({"listen_threads": 1}, 'settings'), (
+        'one listen thread'
+    )
+
+    # The distinctive 1500-byte subject keeps this test's warning apart from
+    # the one in test_routes_regex_match_limit, which uses 2000 bytes.
+    route_match({"headers": {"x-blah": "~^(.*),(.*)[xy]$"}})
+
+    crafted = {'Host': 'localhost', 'X-Blah': ',' * 1500, 'Connection': 'close'}
+
+    # A flood of crafted requests: each is a bounded 500, and the warning is
+    # logged once for the pattern, not once per request, so the flood cannot
+    # flood the log.
+    for _ in range(20):
+        assert client.get(headers=crafted)['status'] == 500, 'match limit'
+
+    assert (
+        wait_for_record(r'\[warn\].+reached the match limit on 1500 bytes')
+        is not None
+    ), 'match limit log'
+
+    # A limit error must not poison the reused object: a normal request still
+    # matches, and a non-matching one is still rejected.
+    assert (
+        client.get(headers={'Host': 'localhost', 'X-Blah': 'a,bx',
+                            'Connection': 'close'})['status']
+        == 200
+    ), 'match after a limit'
+
+    assert (
+        client.get(headers={'Host': 'localhost', 'X-Blah': 'nope',
+                            'Connection': 'close'})['status']
+        == 404
+    ), 'non-match after a limit'
+
+    assert (
+        len(findall(r'reached the match limit on 1500 bytes')) == 1
+    ), 'warn once per pattern'
+
+
 def test_routes_match_regex_captures(require):
     require({'modules': {'regex': True}})
 
@@ -386,6 +441,132 @@ def test_routes_match_regex_negative_case_sensitive(require):
     assert client.get(url='/blah')['status'] == 404, '/blah'
     assert client.get(url='/blh')['status'] == 404, '/blh'
     assert client.get(url='/BLAH')['status'] == 200, '/BLAH'
+
+
+def regex_utf():
+    # "\\x{43f}" is a valid code point only in UTF mode.  PCRE2 with
+    # Unicode support compiles patterns in UTF mode; PCRE 1 matches bytes
+    # and rejects the pattern.
+    return 'success' in route(
+        {"match": {"uri": "~^/\\x{43f}$"}, "action": {"return": 200}}
+    )
+
+
+def test_routes_match_regex_utf8(require, wait_for_record, findall):
+    require({'modules': {'regex': True}})
+
+    if not regex_utf():
+        pytest.skip('PCRE 1 or PCRE2 without Unicode support matches bytes')
+
+    assert client.get(url='/%D0%BF')['status'] == 200, 'code point'
+    assert client.get(url='/%D0%B0')['status'] == 404, 'other code point'
+
+    route_match({"uri": "~^/.$"})
+    assert client.get(url='/%D0%BF')['status'] == 200, 'dot'
+    assert client.get(url='/%D0%BF%D0%BF')['status'] == 404, 'dot two'
+
+    route_match({"uri": "~^/[а-я]+$"})
+    assert client.get(url='/%D0%BF%D1%8F')['status'] == 200, 'class'
+    assert client.get(url='/%D0%BFz')['status'] == 404, 'class miss'
+
+    # A subject with invalid UTF-8 matches bytes, as before UTF mode.
+    route_match({"uri": "~^/.*$"})
+    assert client.get(url='/%FF')['status'] == 200, 'invalid uri'
+    assert client.get(url='/a')['status'] == 200, 'valid uri'
+
+    route_match({"headers": {"x-blah": "~^a.*$"}})
+    assert (
+        client.http(
+            b'GET / HTTP/1.1\r\nHost: localhost\r\nX-Blah: a\xff\r\n'
+            b'Connection: close\r\n\r\n',
+            raw=True,
+            encoding='latin-1',
+        )['status']
+        == 200
+    ), 'invalid header'
+
+    # "\\xff" is the code point U+00FF on valid UTF-8, and the byte FF on
+    # a subject that is not valid UTF-8.
+    route_match({"uri": "~^/\\xff$"})
+    assert client.get(url='/%C3%BF')['status'] == 200, 'escape code point'
+    assert client.get(url='/%FF')['status'] == 200, 'escape byte'
+
+    # A pattern that is valid only in UTF mode has no byte-mode twin, so a
+    # subject that is not valid UTF-8 fails the request.
+    route_match({"uri": "~^/\\x{43f}$"})
+    assert client.get(url='/%D0%BF')['status'] == 200, 'UTF-only pattern'
+    assert client.get(url='/%FF')['status'] == 500, 'UTF-only invalid'
+
+    # "(*UTF)" sets UTF mode in the pattern, so its twin matches in UTF mode
+    # too, and an invalid byte fails the request, as before.
+    route_match({"uri": "~(*UTF)^/.*$"})
+    assert client.get(url='/a')['status'] == 200, '(*UTF) valid'
+    assert client.get(url='/%FF')['status'] == 500, '(*UTF) invalid'
+
+    # A class of bytes such as "[\\x80-\\xff]" is a class of code points
+    # U+0080 to U+00FF, so it no longer matches a Cyrillic path.
+    route_match({"uri": "~^/[\\x80-\\xff]+$"})
+    assert client.get(url='/%D0%BF')['status'] == 404, 'byte class'
+    assert client.get(url='/%C3%BF')['status'] == 200, 'byte class U+00FF'
+
+    # "\\xc3\\xa9" is U+00C3 U+00A9, not the UTF-8 bytes of U+00E9, and a
+    # notice at load says so.
+    route_match({"uri": "~^/caf\\xc3\\xa9$"})
+    assert (
+        wait_for_record(r'\[notice\].+has a byte escape at offset 5')
+        is not None
+    ), 'byte escape notice'
+    assert client.get(url='/caf%C3%A9')['status'] == 404, 'UTF-8 bytes'
+    assert client.get(url='/caf%C3%83%C2%A9')['status'] == 200, 'code points'
+
+    # "\\x{c3}\\x{a9}" too, and a leading zero does not hide it.
+    route_match({"uri": "~^/caf\\x{c3}\\x{0a9}$"})
+    assert (
+        wait_for_record(r'regex "\^/caf\\x\{c3\}.+byte escape at offset 5')
+        is not None
+    ), 'braced byte escape notice'
+    assert client.get(url='/caf%C3%A9')['status'] == 404, 'braced UTF-8 bytes'
+
+    # With "(*UTF)" "\\xe9" was a code point before UTF mode too, so there
+    # is no notice for it.
+    route_match({"uri": "~(*UTF)^/caf\\xe9$"})
+    assert client.get(url='/caf%C3%A9')['status'] == 200, '(*UTF) escape'
+    assert not findall(r'regex "\(\*UTF\).+has a byte escape'), '(*UTF) notice'
+
+
+def test_routes_match_regex_deny_invalid_utf8(require):
+    require({'modules': {'regex': True}})
+
+    assert 'success' in client.conf(
+        [
+            {"match": {"uri": "~^/admin/.*$"}, "action": {"return": 403}},
+            {"action": {"return": 200}},
+        ],
+        'routes',
+    )
+
+    assert client.get(url='/admin/a')['status'] == 403, 'admin'
+    assert client.get(url='/a')['status'] == 200, 'other'
+
+    # An invalid byte must not let a client skip the deny rule.
+    assert client.get(url='/admin/%FF')['status'] == 403, 'invalid byte'
+    assert client.get(url='/admin/%D0%BF%FF')['status'] == 403, 'mixed'
+
+
+def test_routes_match_regex_negative_invalid_utf8(require):
+    require({'modules': {'regex': True}})
+
+    assert 'success' in client.conf(
+        [
+            {"match": {"uri": "!~^/admin/.*$"}, "action": {"return": 200}},
+            {"action": {"return": 403}},
+        ],
+        'routes',
+    )
+
+    assert client.get(url='/admin/a')['status'] == 403, 'admin'
+    assert client.get(url='/a')['status'] == 200, 'other'
+    assert client.get(url='/admin/%FF')['status'] == 403, 'invalid byte'
 
 
 def test_routes_pass_encode():
@@ -716,6 +897,149 @@ def test_routes_match_host_case_insensitive():
 
     host('example.com', 200)
     host('EXAMPLE.COM', 200)
+
+
+def test_routes_match_host_idn():
+    # A Unicode host pattern matches the punycode form a client sends.
+    route_match({"host": "münchen.example"})
+
+    host('xn--mnchen-3ya.example', 200)
+    host('XN--MNCHEN-3YA.EXAMPLE', 200)
+    host('xn--mnchen-3ya.example:8080', 200)
+    host('xn--mnchen-3ya.example.', 200)
+    host('muenchen.example', 404)
+    host('www.xn--mnchen-3ya.example', 404)
+
+    # A raw UTF-8 Host, which no browser sends, no longer matches by
+    # byte equality: the pattern is stored in punycode.
+    host('münchen.example', 404)
+
+
+def test_routes_match_host_idn_ascii_case():
+    route_match({"host": "München.Example"})
+
+    host('xn--mnchen-3ya.example', 200)
+
+
+def test_routes_match_host_idn_punycode():
+    route_match({"host": "xn--mnchen-3ya.example"})
+
+    host('xn--mnchen-3ya.example', 200)
+    host('XN--MNCHEN-3YA.example', 200)
+
+
+def test_routes_match_host_idn_mixed_labels():
+    route_match({"host": "münchen.xn--e1afmkfd.example"})
+
+    host('xn--mnchen-3ya.xn--e1afmkfd.example', 200)
+    host('xn--mnchen-3ya.example', 404)
+
+
+def test_routes_match_host_idn_wildcard():
+    route_match({"host": "*.münchen.example"})
+
+    host('www.xn--mnchen-3ya.example', 200)
+    host('a.b.xn--mnchen-3ya.example', 200)
+    host('xn--mnchen-3ya.example', 404)
+
+    route_match({"host": "münchen.*"})
+
+    host('xn--mnchen-3ya.example', 200)
+    host('xn--mnchen-3ya.test', 200)
+    host('www.xn--mnchen-3ya.example', 404)
+
+
+def test_routes_match_host_idn_negative():
+    route_match({"host": ["*.example", "!münchen.example"]})
+
+    host('www.example', 200)
+    host('xn--mnchen-3ya.example', 404)
+
+
+def test_routes_match_host_idn_invalid():
+    # A wildcard inside a non-ASCII label cannot be converted.
+    route_match_invalid({"host": "mün*chen.example"})
+    route_match_invalid({"host": "*ünchen.example"})
+    route_match_invalid({"host": "münchen*.example"})
+    route_match_invalid({"host": "!mün*chen.example"})
+
+    # A label over 63 bytes in punycode.
+    route_match_invalid({"host": "ü" * 60 + ".example"})
+
+    # The same labels are fine when the wildcard is a label of its own.
+    route_match({"host": "*.münchen.example"})
+
+
+def test_routes_match_host_idn_not_nfc(wait_for_record):
+    # An uppercase non-ASCII letter or an NFD form is accepted, but its
+    # punycode form is not the one a browser sends, so a warning is logged.
+    route_match({"host": "MÜNCHEN.example"})
+
+    assert wait_for_record(
+        r'\[warn\].+the "host" pattern "MÜNCHEN.example" is matched as '
+        r'"xn--MNCHEN-psa.example"'
+    ), 'uppercase warning'
+    host('xn--mnchen-3ya.example', 404)
+
+    route_match({"host": "mu\u0308nchen.example"})
+
+    assert wait_for_record(
+        r'\[warn\].+the "host" pattern "mu\u0308nchen.example" is matched as '
+        r'"xn--munchen-gie.example"'
+    ), 'nfd warning'
+    host('xn--mnchen-3ya.example', 404)
+
+
+def test_routes_match_host_idn_stored(
+    requires_restart, wait_for_record, monkeypatch
+):
+    """Earlier versions accepted a "*" inside a non-ASCII label.  unitd
+    still loads a stored configuration with one, warns, and compares the
+    pattern as written.  An update through the API is refused until the
+    pattern is corrected."""
+
+    routes = [
+        {"match": {"host": "mün*chen.example"}, "action": {"return": 200}},
+        {"match": {"host": "!mün*chen.example"}, "action": {"return": 403}},
+    ]
+    conf = client.conf_get()
+    conf['routes'] = routes
+
+    unit_stop()
+
+    statedir = Path(tempfile.mkdtemp(prefix='unit-state-'))
+    (statedir / 'conf.json').write_text(json.dumps(conf))
+
+    monkeypatch.setattr(Status, '_check_zeros', lambda: None)
+
+    try:
+        unit_run(state_dir=str(statedir))
+
+        assert client.conf_get('routes') == routes, 'stored configuration'
+
+        assert wait_for_record(
+            r'\[warn\].+the restored configuration has the "host" pattern '
+            r'"mün\*chen.example", which cannot be converted to punycode'
+        ), 'validator warning'
+        assert wait_for_record(
+            r'\[warn\].+the "host" pattern "mün\*chen.example" cannot be '
+            r'converted to punycode: .+  It is compared as written'
+        ), 'router warning'
+
+        # As in earlier versions, a byte compare of the raw UTF-8 Host.
+        host('münXchen.example', 200)
+        host('example', 403)
+
+        resp = client.conf(routes, 'routes')
+        assert 'error' in resp, 'update refused'
+
+        routes[0]['match']['host'] = '*chen.example'
+        routes[1]['match']['host'] = '!*chen.example'
+        assert 'success' in client.conf(routes, 'routes'), 'update'
+
+    finally:
+        unit_stop()
+        shutil.rmtree(statedir, ignore_errors=True)
 
 
 def test_routes_match_host_port():
@@ -1150,6 +1474,29 @@ def test_routes_match_headers_case_insensitive():
     ), 'match headers case insensitive'
 
 
+def test_routes_match_headers_transfer_encoding():
+    # The parser marks Transfer-Encoding "skip" so that it is not forwarded.
+    # A route still sees it.
+    assert 'success' in client.conf(
+        {"http": {"chunked_transform": True}}, 'settings'
+    )
+
+    route_match({"headers": {"Transfer-Encoding": "chunked"}})
+
+    assert client.get()['status'] == 404, 'no Transfer-Encoding'
+    assert (
+        client.post(
+            headers={
+                "Host": "localhost",
+                "Transfer-Encoding": "chunked",
+                "Connection": "close",
+            },
+            body='1\r\nx\r\n0\r\n\r\n',
+        )['status']
+        == 200
+    ), 'match Transfer-Encoding'
+
+
 def test_routes_match_headers_invalid():
     route_match_invalid({"headers": ["blah"]})
     route_match_invalid({"headers": {"foo": ["bar", {}]}})
@@ -1266,6 +1613,7 @@ def test_routes_match_arguments_chars():
 
     def check_args(args, query):
         route_match({"arguments": args})
+        query = query.replace(' ', '%20')
         assert client.get(url=f'/?{query}')['status'] == 200
 
     check_args({chars: chars}, f'{chars}={chars}')
@@ -1288,15 +1636,15 @@ def test_routes_match_arguments_empty():
 
 def test_routes_match_arguments_space():
     route_match({"arguments": {"+fo o%20": "%20b+a r"}})
-    assert client.get(url='/? fo o = b a r&')['status'] == 200
+    assert client.get(url='/? fo o = b a r&')['status'] == 400
     assert client.get(url='/?+fo+o+=+b+a+r&')['status'] == 200
     assert client.get(url='/?%20fo%20o%20=%20b%20a%20r&')['status'] == 200
 
     route_match({"arguments": {"%20foo": " bar"}})
-    assert client.get(url='/? foo= bar')['status'] == 200
+    assert client.get(url='/? foo= bar')['status'] == 400
     assert client.get(url='/?+foo=+bar')['status'] == 200
     assert client.get(url='/?%20foo=%20bar')['status'] == 200
-    assert client.get(url='/?+foo= bar')['status'] == 200
+    assert client.get(url='/?+foo= bar')['status'] == 400
     assert client.get(url='/?%20foo=+bar')['status'] == 200
 
 
@@ -1507,7 +1855,9 @@ def test_routes_match_query():
     assert client.get(url='/?a=b&c=d')['status'] == 200
 
     route_match({"query": "a=b%26c%3Dd+e"})
-    assert client.get(url='/?a=b&c=d e')['status'] == 200
+    assert client.get(url='/?a=b&c=d e')['status'] == 400
+    assert client.get(url='/?a=b&c=d+e')['status'] == 200
+    assert client.get(url='/?a=b&c=d%20e')['status'] == 200
 
 
 def test_routes_match_query_array():
@@ -2179,3 +2529,64 @@ def test_routes_match_if_njs(require):
     assert client.get(url='/foo_2?foo=2')['status'] == 200
 
     assert 'error' in client.conf('$arg_', 'routes/0/match/if')
+
+
+def test_route_return_101_websocket_handshake():
+    """A configured 101 is a plain response, not a protocol switch."""
+    assert 'success' in client.conf(
+        {
+            "listeners": {"*:8080": {"pass": "routes"}},
+            "routes": [{"action": {"return": 101}}],
+            "applications": {},
+        }
+    ), 'route return 101'
+
+    # A valid WebSocket handshake with one masked text frame pipelined in the
+    # same write.  The frame must not start a frame reader on a 101 the router
+    # built itself; before this it ran a NULL request state and crashed the
+    # router.
+    request = (
+        'GET / HTTP/1.1\r\n'
+        'Host: localhost\r\n'
+        'Upgrade: websocket\r\n'
+        'Connection: Upgrade\r\n'
+        'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n'
+        'Sec-WebSocket-Version: 13\r\n'
+        '\r\n'
+    ).encode()
+
+    mask = b'\x01\x02\x03\x04'
+    frame = b'\x81\x85' + mask + bytes(
+        b ^ mask[i % 4] for i, b in enumerate(b'hello')
+    )
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(5)
+
+    raw = b''
+
+    try:
+        sock.connect(('127.0.0.1', port_map.port(8080)))
+        sock.sendall(request + frame)
+
+        while not raw.endswith(b'\r\n\r\n'):
+            part = sock.recv(1)
+
+            if not part:
+                break
+
+            raw += part
+
+    except OSError:
+        pass
+
+    finally:
+        sock.close()
+
+    assert raw.startswith(b'HTTP/1.1 101'), f'no plain 101: {raw[:200]!r}'
+    assert b'Upgrade: websocket' not in raw, (
+        f'101 treated as an upgrade: {raw[:400]!r}'
+    )
+
+    # The fixture fails the test if the router process was restarted.
+    assert client.get()['status'] == 101, 'router lost after the frame'

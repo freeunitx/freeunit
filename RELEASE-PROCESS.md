@@ -56,18 +56,41 @@ Create a commit that updates the docs/changes.xml for this release.
 As well as adding the various entries also update the 'date' and 'time'
 fields.
 
-## Update the CHANGES file
+Each entry is a `<change>` with a `type` of bugfix, feature, change,
+security or workaround, and one or more `<para>` elements.  A paragraph
+becomes a paragraph of the changelog, so use a second `<para>` for the
+paragraphs of one entry that stand apart.
 
-CHANGES is maintained by hand: every changelog commit adds its entry to
-both docs/changes.xml and CHANGES.  For the release, retitle the top block
-and set its date, keeping the leading blank line and the column the date
-sits in:
+## The CHANGES file
 
-    Changes with FreeUnit X.Y.Z                                     DD Mon YYYY
+The CHANGES file in the root of the tree is generated from
+docs/changes.xml:
 
-Do not regenerate it with `make -C docs/ changes`: the generator titles the
-block "Changes with Unit" and wraps every entry differently from the file
-in the tree, so the result is a rewrite rather than an update.
+    $ make -C docs changes
+
+It writes build/CHANGES and copies it over CHANGES.  Never edit CHANGES by
+hand: edit docs/changes.xml and run the command again.  A hand edit is lost
+the next time the file is generated, and the two files diverge.
+
+The CI job "Check the generated files" runs "make -C docs check" and compares
+the generated file with the committed one.  The job fails when the two differ.
+Run the target before the release commit.
+
+The packager of a stanza names the product in the title.  A stanza packed
+by "FreeUnit Packaging" is titled "Changes with FreeUnit X.Y.Z".  Any other
+packager is titled "Changes with Unit X.Y.Z".
+The date of a block comes from the 'date' and 'time' fields of its stanza.
+
+The stylesheet that renders the file, docs/changes.xslt, is the compiled
+form of docs/changes.xsls.  xslscript.pl, which compiles it, is not
+packaged in most distributions, so the compiled file is committed and the
+two must be changed together.  If xslscript.pl is at hand, "make -C docs
+xslt XSLS=/path/to/xslscript.pl" rebuilds it.
+
+The target "make -C docs stylesheet-check" compares the named templates of
+the two files.  It fails when they differ.  The compiler is not available in
+most environments, so the target cannot compare the body of a template.
+Run it after a change to either file.
 
 
 # Merge it
@@ -92,9 +115,10 @@ The tag can be pushed just as the branch is. E.g.
 Do not create the `unitctl/X.Y.Z` tag by hand.  Pushing `X.Y.Z` runs
 .github/workflows/unitctl.yml, whose release job creates `unitctl/X.Y.Z`
 and its release itself; a tag that already exists makes that step fail.
-The same push runs build-deb.yml and release-docker.yml; the latter logs
-in to Docker Hub, so the DOCKERHUB_USERNAME and DOCKERHUB_TOKEN secrets
-have to be set before the tag is pushed.
+The same push runs build-deb.yml, release-docker.yml and
+release-source.yml.  release-docker.yml logs in to Docker Hub, so the
+DOCKERHUB_USERNAME and DOCKERHUB_TOKEN secrets have to be set before the
+tag is pushed.
 
 
 # A new 'Release'
@@ -105,11 +129,60 @@ After a while the new release should show up at
 
 # Tarball
 
-We need to publish an archive of the source and a checksum.
+Pushing the tag `X.Y.Z` runs .github/workflows/release-source.yml.  It
+runs `make -C pkg dist` and attaches `unit-X.Y.Z.tar.gz` and
+`unit-X.Y.Z.tar.gz.sha512` to the published GitHub release for the tag.
+If no release exists yet, the job creates a published release with a
+one-line body, and build-deb.yml adds its package section later.  The
+job fails if the version file at the tag does not name `X.Y.Z`, or if
+the release for the tag is still a draft.
 
-    $ cd pkg
-    $ make dist
-    $ rsync -tv unit-X.Y.Z.tar.* dev:/data/www/freeunit.org/download/
+To verify the published files:
+
+    $ base=https://github.com/freeunitorg/freeunit/releases/download/X.Y.Z
+    $ curl -fLO $base/unit-X.Y.Z.tar.gz
+    $ curl -fLO $base/unit-X.Y.Z.tar.gz.sha512
+    $ sha512sum -c unit-X.Y.Z.tar.gz.sha512
+
+The tar stream is reproducible: the file times are the commit time.
+The .tar.gz is not always the same.  Since git 2.38, `git archive`
+compresses .tar.gz inside git with the zlib that git is linked to, and
+the gzip header has no time stamp.  So a rebuild from the same tag gives
+the same checksum only with git 2.38 or newer linked to zlib, as on the
+Ubuntu runner.  A git linked to zlib-ng (Fedora, Arch), an older git, or
+a `tar.tar.gz.command` setting gives other bytes with the same content.
+
+The job never replaces a published file.  When the release already has
+`unit-X.Y.Z.tar.gz` or its `.sha512`, the job compares the sha512.  If
+it is equal, the job does not upload the file again.  If it differs, the
+job fails and prints both sums.  Packagers pin this checksum, so do not
+replace a published tarball.
+
+If the job failed, re-run it from the default branch: on the Actions tab
+pick "Release source tarball", "Run workflow", the default branch, and
+enter the release tag `X.Y.Z`.  Dispatching from the default branch runs
+the current workflow definition; "Re-run jobs" on the original tag push
+repeats the definition at the pushed tag, so a later fix would not apply.
+To upload by hand instead, check out the tag and rebuild the files.
+Then download the files that are already on the release and compare
+them with the rebuilt ones:
+
+    $ git checkout X.Y.Z
+    $ make -C pkg dist
+    $ rm -rf old
+    $ gh release download X.Y.Z -D old -p 'unit-X.Y.Z.tar.gz*'
+    $ cmp old/unit-X.Y.Z.tar.gz pkg/unit-X.Y.Z.tar.gz
+    $ cmp old/unit-X.Y.Z.tar.gz.sha512 pkg/unit-X.Y.Z.tar.gz.sha512
+
+`gh release download` fails when the release has neither file, and
+`cmp` reports a missing file for each file that is not on the release.
+If `cmp` reports that a file differs, stop and upload nothing, as the
+job does.  Otherwise upload only the files that are missing.  Without
+`--clobber`, `gh` refuses the whole command when any file it names is
+already on the release, so give each file its own command:
+
+    $ gh release upload X.Y.Z pkg/unit-X.Y.Z.tar.gz
+    $ gh release upload X.Y.Z pkg/unit-X.Y.Z.tar.gz.sha512
 
 
 # Docs

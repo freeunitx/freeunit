@@ -18,8 +18,6 @@ typedef struct {
     unsigned   complex_target:1;
     /* target with "%" */
     unsigned   quoted_target:1;
-    /* target with " " */
-    unsigned   space_in_target:1;
 } nxt_http_parse_test_request_line_t;
 
 
@@ -61,7 +59,7 @@ typedef struct {
 
 
 static nxt_int_t nxt_http_parse_test_run(nxt_http_request_parse_t *rp,
-    nxt_str_t *request);
+    nxt_str_t *request, nxt_bool_t one_read);
 static nxt_int_t nxt_http_parse_test_bench(nxt_thread_t *thr,
     nxt_str_t *request, nxt_lvlhsh_t *hash, const char *name, nxt_uint_t n);
 static void nxt_http_parse_test_hash_destroy(nxt_lvlhsh_t *hash);
@@ -185,7 +183,7 @@ static nxt_http_parse_test_case_t  nxt_http_test_cases[] = {
             nxt_string("/"),
             nxt_null_string,
             "HTTP/1.0",
-            0, 0, 0
+            0, 0
         }}
     },
     {
@@ -197,7 +195,7 @@ static nxt_http_parse_test_case_t  nxt_http_test_cases[] = {
             nxt_string("/d.ir/fi+le.ext?key=val"),
             nxt_string("key=val"),
             "HTTP/1.2",
-            0, 0, 0
+            0, 0
         }}
     },
     {
@@ -209,7 +207,7 @@ static nxt_http_parse_test_case_t  nxt_http_test_cases[] = {
             nxt_string("/di.r/?"),
             nxt_string(""),
             "HTTP/1.0",
-            0, 0, 0
+            0, 0
         }}
     },
     {
@@ -251,7 +249,7 @@ static nxt_http_parse_test_case_t  nxt_http_test_cases[] = {
             nxt_string("/."),
             nxt_null_string,
             "HTTP/1.0",
-            1, 0, 0
+            1, 0
         }}
     },
     {
@@ -263,7 +261,7 @@ static nxt_http_parse_test_case_t  nxt_http_test_cases[] = {
             nxt_string("/#"),
             nxt_null_string,
             "HTTP/1.0",
-            1, 0, 0
+            1, 0
         }}
     },
     {
@@ -275,7 +273,7 @@ static nxt_http_parse_test_case_t  nxt_http_test_cases[] = {
             nxt_string("/?#"),
             nxt_string(""),
             "HTTP/1.0",
-            1, 0, 0
+            1, 0
         }}
     },
     {
@@ -287,7 +285,7 @@ static nxt_http_parse_test_case_t  nxt_http_test_cases[] = {
             nxt_string("//"),
             nxt_null_string,
             "HTTP/1.0",
-            1, 0, 0
+            1, 0
         }}
     },
     {
@@ -299,43 +297,200 @@ static nxt_http_parse_test_case_t  nxt_http_test_cases[] = {
             nxt_string("/%20"),
             nxt_null_string,
             "HTTP/1.0",
-            0, 1, 0
+            0, 1
         }}
     },
     {
         nxt_string("GET / a HTTP/1.0\r\n\r\n"),
-        NXT_DONE,
-        &nxt_http_parse_test_request_line,
-        { .request_line = {
-            nxt_string("GET"),
-            nxt_string("/ a"),
-            nxt_null_string,
-            "HTTP/1.0",
-            0, 0, 1
-        }}
+        NXT_HTTP_PARSE_INVALID,
+        NULL, { NULL }
     },
     {
         nxt_string("GET /na %20me.ext?args HTTP/1.0\r\n\r\n"),
-        NXT_DONE,
-        &nxt_http_parse_test_request_line,
-        { .request_line = {
-            nxt_string("GET"),
-            nxt_string("/na %20me.ext?args"),
-            nxt_string("args"),
-            "HTTP/1.0",
-            0, 1, 1
-        }}
+        NXT_HTTP_PARSE_INVALID,
+        NULL, { NULL }
     },
     {
         nxt_string("GET / HTTP/1.0 HTTP/1.1\r\n\r\n"),
+        NXT_HTTP_PARSE_INVALID,
+        NULL, { NULL }
+    },
+    {
+        nxt_string("GET /pa th HTTP/1.1\r\n\r\n"),
+        NXT_HTTP_PARSE_INVALID,
+        NULL, { NULL }
+    },
+    {
+        nxt_string("GET /?q=a b HTTP/1.1\r\n\r\n"),
+        NXT_HTTP_PARSE_INVALID,
+        NULL, { NULL }
+    },
+    {
+        nxt_string("GET /pa\tth HTTP/1.1\r\n\r\n"),
+        NXT_HTTP_PARSE_INVALID,
+        NULL, { NULL }
+    },
+    {
+        nxt_string("GET /\t HTTP/1.1\r\n\r\n"),
+        NXT_HTTP_PARSE_INVALID,
+        NULL, { NULL }
+    },
+    {
+        nxt_string("GET /?q=a\vb HTTP/1.1\r\n\r\n"),
+        NXT_HTTP_PARSE_INVALID,
+        NULL, { NULL }
+    },
+    {
+        nxt_string("GET /pa\fth HTTP/1.1\r\n\r\n"),
+        NXT_HTTP_PARSE_INVALID,
+        NULL, { NULL }
+    },
+    {
+        nxt_string("GET /pa\rth HTTP/1.1\r\n\r\n"),
+        NXT_HTTP_PARSE_INVALID,
+        NULL, { NULL }
+    },
+    {
+        nxt_string("GET /pa\001th HTTP/1.1\r\n\r\n"),
+        NXT_HTTP_PARSE_INVALID,
+        NULL, { NULL }
+    },
+    {
+        nxt_string("GET /#a\033b HTTP/1.1\r\n\r\n"),
+        NXT_HTTP_PARSE_INVALID,
+        NULL, { NULL }
+    },
+    {
+        nxt_string("GET /pa\177th HTTP/1.1\r\n\r\n"),
+        NXT_HTTP_PARSE_INVALID,
+        NULL, { NULL }
+    },
+    {
+        nxt_string("GET /./pa th HTTP/1.1\r\n\r\n"),
+        NXT_HTTP_PARSE_INVALID,
+        NULL, { NULL }
+    },
+    {
+        nxt_string("GET //pa th HTTP/1.1\r\n\r\n"),
+        NXT_HTTP_PARSE_INVALID,
+        NULL, { NULL }
+    },
+    {
+        nxt_string("GET /pa%20 th HTTP/1.1\r\n\r\n"),
+        NXT_HTTP_PARSE_INVALID,
+        NULL, { NULL }
+    },
+    {
+        nxt_string("GET /#a b HTTP/1.1\r\n\r\n"),
+        NXT_HTTP_PARSE_INVALID,
+        NULL, { NULL }
+    },
+    {
+        nxt_string("GET /pa  th HTTP/1.1\r\n\r\n"),
+        NXT_HTTP_PARSE_INVALID,
+        NULL, { NULL }
+    },
+    {
+        nxt_string("GET /pa Hx"),
+        NXT_HTTP_PARSE_INVALID,
+        NULL, { NULL }
+    },
+    {
+        nxt_string("GET /pa HTTP/x"),
+        NXT_HTTP_PARSE_INVALID,
+        NULL, { NULL }
+    },
+    {
+        nxt_string("GET /pa HTTP/1x"),
+        NXT_HTTP_PARSE_INVALID,
+        NULL, { NULL }
+    },
+    {
+        nxt_string("GET /pa HTTP/1.x"),
+        NXT_HTTP_PARSE_INVALID,
+        NULL, { NULL }
+    },
+    {
+        nxt_string("GET /pa HTTP/1.10\r\n\r\n"),
+        NXT_HTTP_PARSE_INVALID,
+        NULL, { NULL }
+    },
+    {
+        nxt_string("GET / HTTP"),
+        NXT_AGAIN,
+        NULL, { NULL }
+    },
+    {
+        nxt_string("GET / HTTP/"),
+        NXT_AGAIN,
+        NULL, { NULL }
+    },
+    {
+        nxt_string("GET / HTTP/1"),
+        NXT_AGAIN,
+        NULL, { NULL }
+    },
+    {
+        nxt_string("GET / HTTP/1."),
+        NXT_AGAIN,
+        NULL, { NULL }
+    },
+    {
+        nxt_string("GET / HTTP/1.1"),
+        NXT_AGAIN,
+        NULL, { NULL }
+    },
+    {
+        nxt_string("GET / HTTP/1.1\r"),
+        NXT_AGAIN,
+        NULL, { NULL }
+    },
+    {
+        nxt_string("GET /pa%20th?q=a%20b+c HTTP/1.1\r\n\r\n"),
         NXT_DONE,
         &nxt_http_parse_test_request_line,
         { .request_line = {
             nxt_string("GET"),
-            nxt_string("/ HTTP/1.0"),
+            nxt_string("/pa%20th?q=a%20b+c"),
+            nxt_string("q=a%20b+c"),
+            "HTTP/1.1",
+            0, 1
+        }}
+    },
+    {
+        nxt_string("GET /pa%09th HTTP/1.1\r\n\r\n"),
+        NXT_DONE,
+        &nxt_http_parse_test_request_line,
+        { .request_line = {
+            nxt_string("GET"),
+            nxt_string("/pa%09th"),
             nxt_null_string,
             "HTTP/1.1",
-            0, 0, 1
+            0, 1
+        }}
+    },
+    {
+        nxt_string("GET /caf\303\251~ HTTP/1.1\r\n\r\n"),
+        NXT_DONE,
+        &nxt_http_parse_test_request_line,
+        { .request_line = {
+            nxt_string("GET"),
+            nxt_string("/caf\303\251~"),
+            nxt_null_string,
+            "HTTP/1.1",
+            0, 0
+        }}
+    },
+    {
+        nxt_string("GET /pa+th?q=a+b%20c HTTP/1.0\r\n\r\n"),
+        NXT_DONE,
+        &nxt_http_parse_test_request_line,
+        { .request_line = {
+            nxt_string("GET"),
+            nxt_string("/pa+th?q=a+b%20c"),
+            nxt_string("q=a+b%20c"),
+            "HTTP/1.0",
+            0, 0
         }}
     },
     {
@@ -414,6 +569,44 @@ static nxt_http_parse_test_case_t  nxt_http_test_cases[] = {
         nxt_string("GET / HTTP/1.1\r\n"
                    "Host: exa\bmple.com\r\n\r\n"),
         NXT_HTTP_PARSE_INVALID,
+        NULL, { NULL }
+    },
+    {
+        nxt_string("GET / HTTP/1.1\r\n"
+                   "Host: exa\x7fmple.com\r\n\r\n"),
+        NXT_HTTP_PARSE_INVALID,
+        NULL, { NULL }
+    },
+    {
+        nxt_string("GET / HTTP/1.1\r\n"
+                   "Host: example.com/\x7f\r\n\r\n"),
+        NXT_HTTP_PARSE_INVALID,
+        NULL, { NULL }
+    },
+    {
+        nxt_string("GET / HTTP/1.1\r\n"
+                   "Host: exa\tmple\x7f.com\r\n\r\n"),
+        NXT_HTTP_PARSE_INVALID,
+        NULL, { NULL }
+    },
+    {
+        nxt_string("GET / HTTP/1.1\r\n"
+                   "Host: \x7f" "example.com\r\n\r\n"),
+        NXT_HTTP_PARSE_INVALID,
+        NULL, { NULL }
+    },
+    /* DEL in the second 16 bytes of the value. */
+    {
+        nxt_string("GET / HTTP/1.1\r\n"
+                   "Host: 0123456789abcdef0123\x7f" "56789abcdef\r\n\r\n"),
+        NXT_HTTP_PARSE_INVALID,
+        NULL, { NULL }
+    },
+    /* DEL is checked at the end of the line, so the parser asks for more. */
+    {
+        nxt_string("GET / HTTP/1.1\r\n"
+                   "Host: exa\x7fmple.com"),
+        NXT_AGAIN,
         NULL, { NULL }
     },
     {
@@ -765,8 +958,10 @@ nxt_http_parse_test(nxt_thread_t *thr)
         return NXT_ERROR;
     }
 
-    for (i = 0; i < nxt_nitems(nxt_http_test_cases); i++) {
-        test = &nxt_http_test_cases[i];
+    /* Each case runs twice: one byte per read, then all bytes in one read. */
+
+    for (i = 0; i < 2 * nxt_nitems(nxt_http_test_cases); i++) {
+        test = &nxt_http_test_cases[i / 2];
 
         nxt_memzero(&rp, sizeof(nxt_http_request_parse_t));
 
@@ -783,13 +978,14 @@ nxt_http_parse_test(nxt_thread_t *thr)
             rp.discard_unsafe_fields = test->data.fields.discard_unsafe_fields;
         }
 
-        rc = nxt_http_parse_test_run(&rp, &test->request);
+        rc = nxt_http_parse_test_run(&rp, &test->request, i % 2);
 
         if (rc != test->result) {
             nxt_log_alert(thr->log, "http parse test case failed:\n"
                                     " - request:\n\"%V\"\n"
+                                    " - one read: %ui\n"
                                     " - result: %i (expected: %i)",
-                                    &test->request, rc, test->result);
+                                    &test->request, i % 2, rc, test->result);
             return NXT_ERROR;
         }
 
@@ -949,7 +1145,8 @@ done:
 
 
 static nxt_int_t
-nxt_http_parse_test_run(nxt_http_request_parse_t *rp, nxt_str_t *request)
+nxt_http_parse_test_run(nxt_http_request_parse_t *rp, nxt_str_t *request,
+    nxt_bool_t one_read)
 {
     nxt_int_t      rc;
     nxt_buf_mem_t  buf;
@@ -958,7 +1155,7 @@ nxt_http_parse_test_run(nxt_http_request_parse_t *rp, nxt_str_t *request)
     buf.end = request->start + request->length;
 
     buf.pos = buf.start;
-    buf.free = buf.pos + 1;
+    buf.free = one_read ? buf.end - 1 : buf.pos + 1;
 
     do {
         buf.free++;
@@ -1099,16 +1296,6 @@ nxt_http_parse_test_request_line(nxt_http_request_parse_t *rp,
                            request, rp->quoted_target, test->quoted_target);
         return NXT_ERROR;
     }
-
-#if 0
-    if (rp->space_in_target != test->space_in_target) {
-        nxt_log_alert(log, "http parse test case failed:\n"
-                           " - request:\n\"%V\"\n"
-                           " - space_in_target: %d (expected: %d)",
-                           request, rp->space_in_target, test->space_in_target);
-        return NXT_ERROR;
-    }
-#endif
 
     return NXT_OK;
 }

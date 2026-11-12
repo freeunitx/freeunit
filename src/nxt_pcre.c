@@ -9,12 +9,13 @@
 
 
 struct nxt_regex_s {
-    pcre       *code;
-    nxt_str_t  pattern;
+    pcre          *code;
+    nxt_str_t     pattern;
+    nxt_atomic_t  warned;
 };
 
 /*
- * The limits and the match data of one request.  "extra" passes the
+ * The limits and the match data of one router thread.  "extra" passes the
  * structure to the callout, which counts down "budget".
  */
 
@@ -31,6 +32,12 @@ static void nxt_pcre_free(void *p);
 static int nxt_pcre_callout(pcre_callout_block *block);
 
 static nxt_mp_t  *nxt_pcre_mp;
+
+#if (NXT_TESTS)
+nxt_uint_t  nxt_regex_test_match_creates;
+nxt_uint_t  nxt_regex_test_warnings;
+nxt_uint_t  nxt_regex_test_no_utf_check;
+#endif
 
 /*
  * The most nested calls that one match may make.  PCRE 1 makes them on the
@@ -65,6 +72,7 @@ nxt_regex_compile(nxt_mp_t *mp, nxt_str_t *source, nxt_regex_err_t *err)
 
     re->pattern.length = source->length;
     re->pattern.start = (u_char *) pattern;
+    re->warned = 0;
 
     saved_malloc = pcre_malloc;
     saved_free = pcre_free;
@@ -72,6 +80,13 @@ nxt_regex_compile(nxt_mp_t *mp, nxt_str_t *source, nxt_regex_err_t *err)
     pcre_malloc = nxt_pcre_malloc;
     pcre_free = nxt_pcre_free;
     nxt_pcre_mp = mp;
+
+    /*
+     * PCRE 1 has no mode that accepts a subject with invalid UTF-8.  With
+     * PCRE_UTF8 such a subject, for example a header value, makes the match
+     * fail, and PCRE_NO_UTF8_CHECK makes it undefined.  So patterns here
+     * match bytes, not UTF-8 characters.
+     */
 
     re->code = pcre_compile(pattern, 0, &err->msg, &erroffset, NULL);
 
@@ -170,6 +185,10 @@ nxt_regex_match_create(nxt_mp_t *mp, size_t size)
         match->extra.match_limit_recursion = NXT_PCRE_RECURSION_LIMIT;
         match->extra.callout_data = match;
         match->ovecsize = size;
+
+#if (NXT_TESTS)
+        nxt_regex_test_match_creates++;
+#endif
     }
 
     return match;
@@ -198,12 +217,24 @@ nxt_regex_match(nxt_regex_t *re, u_char *subject, size_t length,
         if (ret == PCRE_ERROR_MATCHLIMIT || ret == PCRE_ERROR_CALLOUT
             || ret == PCRE_ERROR_RECURSIONLIMIT)
         {
-            nxt_thread_log_error(NXT_LOG_WARN,
-                                 "pcre_exec() reached the %s limit on %uz "
-                                 "bytes using \"%V\"",
-                                 (ret == PCRE_ERROR_RECURSIONLIMIT)
-                                 ? "recursion" : "match",
-                                 length, &re->pattern);
+            /*
+             * A client can reach a limit on every request.  Warn once per
+             * compiled pattern, so a flood of crafted requests cannot flood
+             * the log.  The pattern is shared by the router threads, so the
+             * flag is set with an atomic compare-and-set: one thread warns.
+             */
+
+            if (nxt_atomic_cmp_set(&re->warned, 0, 1)) {
+#if (NXT_TESTS)
+                nxt_regex_test_warnings++;
+#endif
+                nxt_thread_log_error(NXT_LOG_WARN,
+                                     "pcre_exec() reached the %s limit on %uz "
+                                     "bytes using \"%V\"",
+                                     (ret == PCRE_ERROR_RECURSIONLIMIT)
+                                     ? "recursion" : "match",
+                                     length, &re->pattern);
+            }
 
             return NXT_ERROR;
         }

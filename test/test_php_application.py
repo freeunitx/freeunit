@@ -135,7 +135,7 @@ def test_php_application_variables(date_to_sec_epoch, sec_epoch):
 
     date = headers.pop('Date')
     assert date[-4:] == ' GMT', 'date header timezone'
-    assert abs(date_to_sec_epoch(date) - sec_epoch) < 5, 'date header'
+    assert abs(date_to_sec_epoch(date) - sec_epoch()) < 5, 'date header'
 
     if 'X-Powered-By' in headers:
         headers.pop('X-Powered-By')
@@ -159,9 +159,12 @@ def test_php_application_query_string():
 
     resp = client.get(url='/?var1=val1&var2=val2')
 
+    assert resp['status'] == 200, 'query string status'
     assert (
         resp['headers']['Query-String'] == 'var1=val1&var2=val2'
     ), 'query string'
+    assert resp['headers']['Request-Uri'] == '/?var1=val1&var2=val2'
+    assert resp['headers']['Unit-Rewritten-Path'] == ''
 
 
 def test_php_application_query_string_empty():
@@ -171,6 +174,8 @@ def test_php_application_query_string_empty():
 
     assert resp['status'] == 200, 'query string empty status'
     assert resp['headers']['Query-String'] == '', 'query string empty'
+    assert resp['headers']['Request-Uri'] == '/?'
+    assert resp['headers']['Unit-Rewritten-Path'] == ''
 
 
 def test_php_application_query_string_rewrite():
@@ -196,11 +201,241 @@ def test_php_application_query_string_rewrite():
         },
     )
 
-    assert client.get(url='/old')['status'] == 200
+    resp = client.get(url='/old')
+    assert resp['status'] == 200
+    assert resp['headers']['Query-String'] == ''
+    assert resp['headers']['Request-Uri'] == '/old'
+    assert resp['headers']['Unit-Rewritten-Path'] == '/new'
 
     resp = client.get(url='/old?arg=val')
     assert resp['status'] == 200
     assert resp['headers']['Query-String'] == 'arg=val'
+    assert resp['headers']['Request-Uri'] == '/old?arg=val'
+    assert resp['headers']['Unit-Rewritten-Path'] == '/new'
+
+
+@pytest.mark.parametrize(
+    'url',
+    [
+        '/',
+        '/?x=1',
+        '/index.php',
+        '/index.php/info?a=1',
+        '/.well-known/acme-challenge/token',
+        '/.hidden/',
+        '/.env',
+        '/.env?x=1',
+        '/a/.b/c',
+        '/x/.y/z',
+    ],
+)
+def test_php_application_rewritten_path_verbatim(url):
+    client.load('rewritten_path')
+    assert 'success' in client.conf(
+        '"index.php"', 'applications/rewritten_path/script',
+    )
+
+    resp = client.getjson(url=url)
+    assert resp['status'] == 200
+    data = resp['body']
+
+    # The target already equals its decoded, normalized path and was not
+    # rewritten, so no UNIT_REWRITTEN_PATH is registered.
+    assert data['present'] is False
+    assert data['path'] is None
+    assert data['request_uri'] == url
+
+
+@pytest.mark.parametrize(
+    'url, path, query',
+    [
+        ('/a%20b?x=1', '/a b', 'x=1'),
+        ('/a/b/../c', '/a/c', ''),
+        ('/a/%2e%2e/c', '/c', ''),
+        ('//a//b/./c', '/a/b/c', ''),
+        ('/a%2Fb', '/a/b', ''),
+        ('/%6Eew', '/new', ''),
+        ('/a%3Fb%23c?x=%2F', '/a?b#c', 'x=%2F'),
+        ('/%E4%B8%AD', '/中', ''),
+    ],
+)
+def test_php_application_rewritten_path_normalized(url, path, query):
+    client.load('rewritten_path')
+    assert 'success' in client.conf(
+        '"index.php"', 'applications/rewritten_path/script',
+    )
+
+    resp = client.getjson(url=url)
+    assert resp['status'] == 200
+    data = resp['body']
+
+    # The decoded, normalized path differs from the target's path, so PHP
+    # sees that path in UNIT_REWRITTEN_PATH even without a route rewrite.
+    assert data['present'] is True
+    assert data['path'] == path
+    assert data['request_uri'] == url
+    assert data['query'] == query
+
+
+@pytest.mark.parametrize(
+    'rewrite, url, path',
+    [
+        ('/new', '/old?x=1', '/new'),
+        ('/new?discarded', '/old?x=1', '/new'),
+        ('/a%20b//c/../d', '/old?x=1', '/a b/d'),
+        ('/new$uri', '/old?x=1', '/new/old'),
+        ('/new$uri', '/a%20b?x=1', '/new/a b'),
+        ('/old', '/old?x=1', '/old'),
+        # The rewritten path is decoded and normalized like any request path.
+        ('/a%20b', '/old?x=1', '/a b'),
+        ('/a/b/../c', '/old?x=1', '/a/c'),
+        ('//x//y', '/old?x=1', '/x/y'),
+    ],
+)
+def test_php_application_rewritten_path_rewrite(rewrite, url, path):
+    client.load('rewritten_path')
+    assert 'success' in client.conf(
+        '"index.php"', 'applications/rewritten_path/script',
+    )
+    assert 'success' in client.conf(
+        [{'action': {
+            'rewrite': rewrite,
+            'pass': 'applications/rewritten_path',
+        }}],
+        'routes',
+    )
+    assert 'success' in client.conf('"routes"', 'listeners/*:8080/pass')
+
+    resp = client.getjson(url=url)
+    assert resp['status'] == 200
+    data = resp['body']
+    assert data['present'] is True
+    assert data['path'] == path
+    assert data['request_uri'] == url
+    assert data['query'] == 'x=1'
+
+
+def test_php_application_rewritten_path_multiple_rewrites():
+    client.load('rewritten_path')
+    assert 'success' in client.conf(
+        '"index.php"', 'applications/rewritten_path/script',
+    )
+    assert 'success' in client.conf(
+        {
+            'first': [{'action': {
+                'rewrite': '/mid', 'pass': 'routes/second',
+            }}],
+            'second': [{'action': {
+                'rewrite': '/final$uri',
+                'pass': 'applications/rewritten_path',
+            }}],
+        },
+        'routes',
+    )
+    assert 'success' in client.conf('"routes/first"', 'listeners/*:8080/pass')
+
+    resp = client.getjson(url='/old?x=1')
+    assert resp['status'] == 200
+    assert resp['body']['present'] is True
+    assert resp['body']['path'] == '/final/mid'
+    assert resp['body']['request_uri'] == '/old?x=1'
+    assert resp['body']['query'] == 'x=1'
+
+
+def test_php_application_rewritten_path_path_info():
+    client.load('rewritten_path')
+    assert 'success' in client.conf(
+        [{'action': {
+            'rewrite': '/index.php/a%20b',
+            'pass': 'applications/rewritten_path',
+        }}],
+        'routes',
+    )
+    assert 'success' in client.conf('"routes"', 'listeners/*:8080/pass')
+
+    resp = client.getjson(url='/start?x=1')
+    assert resp['status'] == 200
+    data = resp['body']
+    assert data['present'] is True
+    assert data['path'] == '/index.php/a b'
+    assert data['path_info'] == '/a b'
+    assert data['php_self'] == '/index.php/a b'
+    assert data['request_uri'] == '/start?x=1'
+
+
+def test_php_application_rewritten_path_filter_input():
+    client.load('rewritten_path')
+    assert 'success' in client.conf(
+        [{'action': {
+            'rewrite': '/index.php/a%20b',
+            'pass': 'applications/rewritten_path',
+        }}],
+        'routes',
+    )
+    assert 'success' in client.conf('"routes"', 'listeners/*:8080/pass')
+
+    resp = client.getjson(url='/start?x=1')
+    assert resp['status'] == 200
+    data = resp['body']
+    if not data['filter_available']:
+        pytest.skip('filter extension is not loaded')
+
+    # UNIT_REWRITTEN_PATH is registered like SCRIPT_NAME and DOCUMENT_ROOT,
+    # with its interned key and without the INPUT_SERVER filter, so it is in
+    # $_SERVER but not reachable through filter_input(INPUT_SERVER, ...).
+    # REQUEST_URI still goes through the filter, so it stays reachable.
+    assert data['present'] is True
+    assert data['path'] == '/index.php/a b'
+    assert data['filter_path'] is None
+    assert data['filter_request_uri'] == '/start?x=1'
+
+
+def test_php_application_rewritten_path_worker_reuse():
+    client.load('rewritten_path', processes=1)
+    assert 'success' in client.conf(
+        '"index.php"', 'applications/rewritten_path/script',
+    )
+    assert 'success' in client.conf(
+        [
+            {
+                'match': {'uri': '/old'},
+                'action': {
+                    'rewrite': '/new', 'pass': 'applications/rewritten_path',
+                },
+            },
+            {'action': {'pass': 'applications/rewritten_path'}},
+        ],
+        'routes',
+    )
+    assert 'success' in client.conf('"routes"', 'listeners/*:8080/pass')
+
+    # The worker is reused across requests whose path is rewritten (/old),
+    # left verbatim (/plain) or only normalized (/a%20b).  A request must not
+    # inherit the previous one's value, and the client's own
+    # Unit-Rewritten-Path header only ever reaches PHP prefixed as
+    # HTTP_UNIT_REWRITTEN_PATH.
+    cases = [
+        ('/old', '/new'),
+        ('/plain', None),
+        ('/a%20b', '/a b'),
+        ('/old', '/new'),
+    ]
+
+    for url, path in cases:
+        resp = client.getjson(
+            url=url,
+            headers={
+                'Host': 'localhost',
+                'Connection': 'close',
+                'Unit-Rewritten-Path': '/spoofed',
+            },
+        )
+        assert resp['status'] == 200
+        data = resp['body']
+        assert data['present'] is (path is not None)
+        assert data['path'] == path
+        assert data['request_uri'] == url
+        assert data['http_path'] == '/spoofed'
 
 
 def test_php_application_fastcgi_finish_request(findall, unit_pid):
@@ -349,6 +584,8 @@ def test_php_application_query_string_absent():
 
     assert resp['status'] == 200, 'query string absent status'
     assert resp['headers']['Query-String'] == '', 'query string absent'
+    assert resp['headers']['Request-Uri'] == '/'
+    assert resp['headers']['Unit-Rewritten-Path'] == ''
 
 
 def test_php_application_phpinfo():
@@ -1250,3 +1487,38 @@ def test_php_application_header_only(
         rf'rpc: stream #{stream} (?:last )?handler, type {last[1]}$'
     )
     assert len(messages) == 1, f'{method} response messages: {len(messages)}'
+
+
+def test_php_application_header_name_long(findall, wait_for_record):
+    client.load('header_name_long')
+
+    for length in (255, 256, 300):
+        resp = client.get(
+            headers={
+                'Host': 'localhost',
+                'X-Length': str(length),
+                'Connection': 'close',
+            }
+        )
+
+        if length <= 255:
+            assert resp['status'] == 200, f'status {length}'
+            assert resp['headers']['X' * length] == 'value', f'header {length}'
+            continue
+
+        assert resp['status'] == 500, f'status {length}'
+        # A 256-byte name is cut to an empty one; the status is the check.
+        if length % 256:
+            assert (
+                'X' * (length % 256) not in resp['headers']
+            ), f'no cut name {length}'
+        assert resp['body'] != 'body', f'no application body {length}'
+        assert (
+            wait_for_record(rf'\[error\].+name is too long \({length} bytes')
+            is not None
+        ), f'error log {length}'
+        # PHP sends the headers again at request shutdown.  One line only.
+        assert (
+            len(findall(rf'\[error\].+name is too long \({length} bytes'))
+            == 1
+        ), f'one error line {length}'
