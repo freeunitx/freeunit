@@ -141,6 +141,33 @@ The unit-docs repository needs a copy of CHANGES under
 source/CHANGES.txt
 
 
+# The Homebrew tap
+
+The Homebrew tap
+[freeunitorg/homebrew-unit](https://github.com/freeunitorg/homebrew-unit)
+installs the released FreeUnit on macOS and Linux.
+
+Bump the tap after the release tag is pushed. The tap pins the tag
+revision. It also downloads the released `unitctl` binaries. So the
+`unitctl/X.Y.Z` release must exist first. The push of `X.Y.Z` creates
+that release.
+
+Do the five steps from `pkg/community/MACOS.md`, the section
+"Bump the tap on a release":
+
+1. Bump the tag, the revision, and the `unitctl` sha256 sums in
+   `Formula/unit.rb`.
+2. Bump the tag, the revision, and `depends_on "unit@<version>"` in the
+   seven module formulae.
+3. Bump `php-embed` to the current PHP 8.4 security release.
+4. Rename `Aliases/unit@<version>`.
+5. Open a pull request against `freeunitorg/homebrew-unit`.
+
+The weekly `Rebuild everything` run verifies the formulas on all three
+runners after the merge. Skip no step: a formula that pins an old
+version installs a stale server.
+
+
 # Post release
 
 Immediately after release we should open the next version: add a new
