@@ -1,19 +1,83 @@
-# macOS support — moved to freeunitorg/freeunit-macos
+# macOS and the Homebrew tap
 
-FreeUnit keeps macOS support in a separate fork:
+Main is Linux-first. macOS jobs do not run on pull requests. The C macOS
+job runs after a merge: a push to `master` or `1.37` that touches C paths,
+or by hand. The unitctl darwin builds run at a release tag. Main publishes
+no macOS unitd packages.
+
+An earlier plan was to move macOS support to a separate fork,
 [freeunitorg/freeunit-macos](https://github.com/freeunitorg/freeunit-macos).
-
-This repository is Linux-first. macOS jobs do not run on pull requests.
-The C macOS job runs after a merge: a push to `master` or `1.37` that
-touches C paths, or by hand. The unitctl darwin builds run at a release
-tag. Main publishes no macOS unitd packages.
+That migration was dropped. The fork holds no macOS work of its own. macOS
+packaging lives in the Homebrew tap instead.
 
 The C sources keep the macOS code paths (`NXT_MACOSX`,
 `NXT_HAVE_MACOSX_SENDFILE`, `src/nxt_macosx_sendfile.c`). Configure probes
-gate this code. A Linux build never compiles it. The fork builds it, tests
-it, and ships it.
+gate this code. A Linux build never compiles it. The post-merge macOS job
+compiles and tests these paths on every merge that touches them.
 
-## Why a separate fork
+## The Homebrew tap
+
+macOS packaging lives in the Homebrew tap
+[freeunitorg/homebrew-unit](https://github.com/freeunitorg/homebrew-unit).
+The tap is community maintained. The formulas build the released FreeUnit
+sources. The tap revival merged on 2026-11-24 (PR
+[#1](https://github.com/freeunitorg/homebrew-unit/pull/1) and PR
+[#2](https://github.com/freeunitorg/homebrew-unit/pull/2)).
+
+The tap carries nine formulas:
+
+| Formula | What it installs |
+| ------- | ---------------- |
+| `unit` | `unitd` with njs, plus the released `unitctl` binary |
+| `unit-php` | PHP module (needs `php-embed`) |
+| `unit-python3` | Python 3 module |
+| `unit-java` | Java module |
+| `unit-perl` | Perl module |
+| `unit-ruby` | Ruby module |
+| `unit-wasm` | WebAssembly module |
+| `php-embed` | PHP 8.4 built with the embed SAPI |
+| `unit-python` | The old Python 2 module. Kept for history. It cannot build on macOS that Homebrew supports. |
+
+The `unit` formula builds FreeUnit from the release tag (`1.37.2` today)
+and pins the commit revision. It builds njs from `freeunitorg/njs`. The
+`unitctl` resource downloads the released darwin and linux binaries and
+pins their sha256 sums. The module formulae build against the matching
+`unit` release and install into `lib/unit/modules`.
+
+Install:
+
+```console
+$ brew tap freeunitorg/unit https://github.com/freeunitorg/homebrew-unit
+$ brew install freeunitorg/unit/unit
+```
+
+### Tap CI
+
+A pull request runs `brew test-bot`: a syntax check plus a build of each
+changed formula. The check runs on `macos-26`; the builds run on
+`[ubuntu-24.04, macos-26]`. A first pull request from a new fork needs a
+maintainer approval before the run starts.
+
+The `Rebuild everything` workflow rebuilds every formula on a schedule and
+on a manual dispatch. The runner matrix is
+`[ubuntu-24.04, macos-15, macos-26]` — the full range from the newest to
+the minimum macOS runner GitHub hosts. GitHub retired the `macos-14`
+images on 2026-11-02.
+
+### Bump the tap on a release
+
+Each FreeUnit release needs a tap update:
+
+1. Bump the tag, the revision, and the `unitctl` sha256 sums in
+   `Formula/unit.rb`.
+2. Bump the tag, the revision, and `depends_on "unit@<version>"` in the
+   seven module formulae.
+3. Bump `php-embed` to the current PHP 8.4 security release.
+4. Rename `Aliases/unit@<version>`.
+5. Open a pull request against `freeunitorg/homebrew-unit`. The weekly
+   rebuild verifies the formulas on all three runners.
+
+## Why macOS CI is not on pull requests
 
 macOS CI ran on every push to every branch. The macOS runners used Actions
 minutes on each run.
@@ -29,35 +93,38 @@ over colima mounts only `$HOME`. The shm page size is 16 KiB on Apple
 Silicon ([#595](https://github.com/freeunitorg/freeunit/issues/595)). The
 system shell is bash 3.2. Each workaround touched code that Linux shares.
 
-A separate fork gives macOS its own pace. The fork has its own CI set, its
-own releases, and its own Homebrew formulas.
+Keeping the job off pull requests removes that queue from the PR path. The
+job still runs after each merge that touches C paths, so the macOS code
+paths stay tested.
 
-The trees match today (checked 2026-11-24). Fork `1.37` = main
-`056e0e8d87`. Fork `master` = main `5aad7a7d19`. The fork carries zero
-macOS commits of its own.
+macOS runners are not reliable enough for a required check yet. The macOS
+jobs stay optional until reliable runners exist.
 
-## Migration plan
+## What changed on 2026-11-24
 
-Follow the steps in this order.
-
-- [x] **1. Take the macOS CI off pull requests.** `build-test-macos.yml` lost its `pull_request` trigger and gained `workflow_dispatch`. It runs on a push to `master` or `1.37` that touches C paths, or by hand. No pull request waits for a macOS runner. `src/nxt_macosx_sendfile.c` and the `NXT_MACOSX` paths stay in `src/` and `auto/`. The fork also compiles and tests this code. The archived report stays at the end of this file.
-
-- [ ] **2. Make the fork macOS-only.** In the fork, keep the unitd and unitctl builds, `pkg/macos/build-tarball.sh`, and the Homebrew formulas. Disable the other workflows there: Linux CI, sanitizers, docker-nightly, and audit. Otherwise the fork stays a noisy mirror and burns Actions minutes.
-
-- [ ] **3. Set the fork sync mode.** Pick one: the fork pulls upstream on a schedule, or the fork keeps its own branches. Record the choice here. Without a rule, the trees diverge within a month.
-
-- [x] **4. unitctl darwin targets.** The build legs for `aarch64-apple-darwin` and `x86_64-apple-darwin` stay in `unitctl.yml`, outside pull requests. The `build` job skips PRs now; a tag builds the darwin binaries. The Homebrew tap (`freeunitorg/homebrew-unit`) downloads them from the release. The darwin test leg stays removed: a unitctl PR runs no macOS runner. The formula machinery left main: `tools/unitctl/pkg/brew/`, the `homebrew-packages` make target, and the formula commit in the release flow. Those formulas pointed at the archived `nginxinc/unit-rust-sdk` releases and served a stale binary. The tap owns the formulas now.
-
-- [x] **5. No gate.** The policy is this document. macOS runners in main are limited to two spots: the post-merge C job and the release-time unitctl darwin builds. A diff that adds more is visible in review. The tap and the fork own the rest of the macOS CI.
-
-- [ ] **6. Retarget the open macOS PRs.** PRs [#972](https://github.com/freeunitorg/freeunit/pull/972) and [#973](https://github.com/freeunitorg/freeunit/pull/973) are open in main, milestone 1.37.3: the Homebrew tap and the macOS release tarball. Move them to the fork. macOS packaging belongs in the fork.
-
-PR [#1025](https://github.com/freeunitorg/freeunit/pull/1025) is mergeable now. Its state is `unstable` because four macOS checks on it are cancelled. When this change lands in the base branch, pull requests run no macOS checks at all. The macOS job runs after a merge instead.
+- `build-test-macos.yml` runs on a push to `master` or `1.37` that touches
+  C paths, or by hand. No pull request waits for a macOS runner.
+  `src/nxt_macosx_sendfile.c` and the `NXT_MACOSX` paths stay in `src/`
+  and `auto/`.
+- The unitctl darwin build legs stay in `unitctl.yml`, outside pull
+  requests. A tag builds the darwin binaries, and the tap downloads them
+  from the release. The darwin test leg is gone: a unitctl PR runs no
+  macOS runner.
+- The formula machinery left main: `tools/unitctl/pkg/brew/`, the
+  `homebrew-packages` make target, and the formula commit in the release
+  flow. Those formulas pointed at the archived `nginxinc/unit-rust-sdk`
+  releases and served a stale binary. The tap owns the formulas now.
+- The tap moved to FreeUnit: the nine formulas build FreeUnit `1.37.2`,
+  the runners cover `macos-15` to `macos-26`, and the README describes the
+  tap. The fork migration did not happen.
+- Main publishes no macOS unitd packages. The macOS runners in main are
+  limited to two spots: the post-merge C job and the release-time unitctl
+  darwin builds.
 
 ---
 
 The rest of this file is the original report from 2026-11-15. It stays
-unchanged. The fork holds the live copy.
+unchanged.
 
 # 🩺 macOS local build and test report — FreeUnit on Intel Mac
 
