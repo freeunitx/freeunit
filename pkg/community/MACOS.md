@@ -77,6 +77,39 @@ Each FreeUnit release needs a tap update:
 5. Open a pull request against `freeunitorg/homebrew-unit`. The weekly
    rebuild verifies the formulas on all three runners.
 
+## Free macOS CI options for Homebrew testing
+
+GitHub-hosted macOS runners are the default for Homebrew taps, but they are
+not the only option. The table below summarises the free paths that work for
+testing Homebrew formulas on macOS in 2024–2026.
+
+| Service / path | Free tier | macOS runners | Notes |
+| -------------- | --------- | ------------- | ----- |
+| **GitHub Actions** (hosted) | Included in Free, Pro, Team plans | `macos-15` (arm64), `macos-26` (arm64), `macos-13` (x86_64, retired 2026-11-02) | Queue contention is common on macOS arm64; jobs may wait 15+ min and be cancelled. Works fine for public repos. |
+| **Bitrise Hobby** | 500 macOS build min / month, forever free | macOS M2/M4 runners | Requires a credit card for account verification (not charged unless Pay-As-You-Go is activated). Unlimited public apps. 90 min build timeout. |
+| **Self-hosted runner** | Free (you provide the hardware) | Any macOS version you own | A physical Mac or a cloud macOS VM (Hetzner, MacStadium, AWS EC2 Mac) acts as a runner. No queue waits, but you maintain the machine. |
+| **Cirrus CI** | Free for open source | macOS VMs (arm64, x86_64) | Known to offer free macOS VMs for OSS; pricing page was unreachable at time of writing — verify current limits on cirrus-ci.org. |
+| **BuildJet** | Free tier available | macOS runners for GitHub Actions | Check buildjet.com for current free-minute allowance and runner types. |
+
+### Recommendations for a Homebrew tap
+
+1. **Start with GitHub Actions.** It is the path Homebrew itself expects. The
+   tap already runs `brew test-bot` and `brew install` on `[ubuntu-24.04,
+   macos-15, macos-26]`. No extra account is needed for a public repo.
+
+2. **Add Bitrise Hobby as a backup.** 500 min/month covers a full rebuild of
+   nine formulas every week with margin. Bitrise is useful when the GitHub
+   macOS queue is saturated.
+
+3. **Use self-hosted runners for release validation.** If you own a Mac,
+   register it as a self-hosted runner in `freeunitorg/homebrew-unit`. A
+   self-hosted runner has no queue and no minute limit. It is the most
+   reliable path for release-time macOS builds.
+
+4. **Do not rely on `macos-14`.** GitHub retired that image on 2026-11-02.
+   Pin to `macos-15` (arm64) and `macos-26` (arm64), or add `macos-13`
+   (x86_64/Intel) if Intel coverage is needed.
+
 ## Why macOS CI is not on pull requests
 
 macOS CI ran on every push to every branch. The macOS runners used Actions
