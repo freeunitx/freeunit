@@ -76,7 +76,7 @@ the type of control socket:
  * `docker://container_ID[/path/to/control.socket]`
 
 > **Note:** SSH is recommended for remote confguration. Consider the
-> [security implications](https://unit.nginx.org/howto/security/#secure-socket-and-state)
+> [security implications](https://docs.freeunit.org/howto/security/#secure-socket-and-state)
 > of managing remote configuration over plaintext HTTP.
 
 | Options | |
