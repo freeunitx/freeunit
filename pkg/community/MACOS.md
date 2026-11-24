@@ -3,8 +3,10 @@
 FreeUnit keeps macOS support in a separate fork:
 [freeunitorg/freeunit-macos](https://github.com/freeunitorg/freeunit-macos).
 
-This repository is Linux-first. It does not run macOS CI jobs. It does not
-publish macOS artifacts.
+This repository is Linux-first. macOS jobs do not run on pull requests.
+The C macOS job runs after a merge: a push to `master` or `1.37` that
+touches C paths, or by hand. The unitctl darwin builds run at a release
+tag. Main publishes no macOS unitd packages.
 
 The C sources keep the macOS code paths (`NXT_MACOSX`,
 `NXT_HAVE_MACOSX_SENDFILE`, `src/nxt_macosx_sendfile.c`). Configure probes
@@ -38,19 +40,19 @@ macOS commits of its own.
 
 Follow the steps in this order.
 
-- [x] **1. Remove the macOS CI from main.** `.github/workflows/build-test-macos.yml` is removed. `src/nxt_macosx_sendfile.c` and the `NXT_MACOSX` paths stay in `src/` and `auto/`. The fork compiles and tests this code. Main has no CI for it. The archived report stays at the end of this file.
+- [x] **1. Take the macOS CI off pull requests.** `build-test-macos.yml` lost its `pull_request` trigger and gained `workflow_dispatch`. It runs on a push to `master` or `1.37` that touches C paths, or by hand. No pull request waits for a macOS runner. `src/nxt_macosx_sendfile.c` and the `NXT_MACOSX` paths stay in `src/` and `auto/`. The fork also compiles and tests this code. The archived report stays at the end of this file.
 
 - [ ] **2. Make the fork macOS-only.** In the fork, keep the unitd and unitctl builds, `pkg/macos/build-tarball.sh`, and the Homebrew formulas. Disable the other workflows there: Linux CI, sanitizers, docker-nightly, and audit. Otherwise the fork stays a noisy mirror and burns Actions minutes.
 
 - [ ] **3. Set the fork sync mode.** Pick one: the fork pulls upstream on a schedule, or the fork keeps its own branches. Record the choice here. Without a rule, the trees diverge within a month.
 
-- [x] **4. unitctl darwin targets.** The choice: main drops them. `.github/workflows/unitctl.yml` no longer builds `aarch64-apple-darwin` and `x86_64-apple-darwin`. No workflow in main uses a macOS runner. If the fork wants darwin binaries, it builds and publishes them there. The Homebrew formula machinery left main with them: `tools/unitctl/pkg/brew/`, the `homebrew-packages` make target, and the formula commit in the release flow. Those formulas pointed at the archived `nginxinc/unit-rust-sdk` releases and served a stale binary. The fork owns the formulas now.
+- [x] **4. unitctl darwin targets.** The build legs for `aarch64-apple-darwin` and `x86_64-apple-darwin` stay in `unitctl.yml`, outside pull requests. The `build` job skips PRs now; a tag builds the darwin binaries. The Homebrew tap (`freeunitorg/homebrew-unit`) downloads them from the release. The darwin test leg stays removed: a unitctl PR runs no macOS runner. The formula machinery left main: `tools/unitctl/pkg/brew/`, the `homebrew-packages` make target, and the formula commit in the release flow. Those formulas pointed at the archived `nginxinc/unit-rust-sdk` releases and served a stale binary. The tap owns the formulas now.
 
-- [x] **5. No gate.** The policy is this document. A workflow diff that re-adds a macOS runner is visible in review. The fork owns the macOS CI.
+- [x] **5. No gate.** The policy is this document. macOS runners in main are limited to two spots: the post-merge C job and the release-time unitctl darwin builds. A diff that adds more is visible in review. The tap and the fork own the rest of the macOS CI.
 
 - [ ] **6. Retarget the open macOS PRs.** PRs [#972](https://github.com/freeunitorg/freeunit/pull/972) and [#973](https://github.com/freeunitorg/freeunit/pull/973) are open in main, milestone 1.37.3: the Homebrew tap and the macOS release tarball. Move them to the fork. macOS packaging belongs in the fork.
 
-PR [#1025](https://github.com/freeunitorg/freeunit/pull/1025) is mergeable now. Its state is `unstable` because four macOS checks on it are cancelled. When this removal lands in the base branch, the next push to the PR runs no macOS checks at all.
+PR [#1025](https://github.com/freeunitorg/freeunit/pull/1025) is mergeable now. Its state is `unstable` because four macOS checks on it are cancelled. When this change lands in the base branch, pull requests run no macOS checks at all. The macOS job runs after a merge instead.
 
 ---
 
